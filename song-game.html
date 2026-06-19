@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Song Game</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; background: #0E1117; font-family: -apple-system, 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2C3444; border-radius: 4px; }
+  input, textarea, select { font-family: inherit; }
+  button { cursor: pointer; border: none; font-family: inherit; -webkit-tap-highlight-color: transparent; }
+  select { appearance: none; -webkit-appearance: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ─── Storage (localStorage) ───────────────────────────────────────────────────
+const KEYS = { games: "sg_games", playlists: "sg_playlists" };
+function loadData(key) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : []; } catch { return []; }
+}
+function saveData(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function fmtTime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
+    : `${m}:${String(sec).padStart(2,"0")}`;
+}
+function fmtPct(n, d) { if (!d) return "—"; return Math.round((n / d) * 100) + "%"; }
+
+// ─── Design tokens ────────────────────────────────────────────────────────────
+const T = {
+  bg:"#0E1117", surface:"#181D27", card:"#1F2737", border:"#2C3444",
+  accent:"#F5A623", accentL:"#FFD07A",
+  green:"#4ADE80", red:"#F87171", blue:"#60A5FA", purple:"#A78BFA",
+  text:"#F1F5F9", muted:"#8B99B0", dq:"#374151",
+};
+const PC = ["#F5A623","#60A5FA","#4ADE80","#F87171","#A78BFA","#FB923C","#34D399","#F472B6"];
+
+// ─── Base components ──────────────────────────────────────────────────────────
+function Btn({ children, onClick, variant="primary", disabled, style={}, small }) {
+  const base = {
+    display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6,
+    fontWeight:600, borderRadius:10, transition:"opacity .1s",
+    fontSize: small ? 13 : 15, padding: small ? "6px 14px" : "11px 20px",
+    opacity: disabled ? .4 : 1, cursor: disabled ? "not-allowed" : "pointer",
+  };
+  const V = {
+    primary:   { background: T.accent, color: "#0E1117" },
+    secondary: { background: T.card, color: T.text, border: `1px solid ${T.border}` },
+    ghost:     { background: "transparent", color: T.muted, border: `1px solid ${T.border}` },
+    danger:    { background: "#7F1D1D", color: "#FCA5A5", border: "1px solid #991B1B" },
+    success:   { background: "#14532D", color: T.green, border: "1px solid #166534" },
+  };
+  return <button onClick={disabled ? undefined : onClick} style={{...base,...V[variant],...style}}>{children}</button>;
+}
+
+function Card({ children, style={} }) {
+  return <div style={{ background:T.card, borderRadius:14, border:`1px solid ${T.border}`, padding:16, ...style }}>{children}</div>;
+}
+
+function Lbl({ children, style={} }) {
+  return <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:T.muted, marginBottom:6, ...style }}>{children}</div>;
+}
+
+function TInput({ value, onChange, placeholder, style={} }) {
+  return <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+    style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:8, padding:"10px 12px",
+      color:T.text, fontSize:15, width:"100%", outline:"none", ...style }} />;
+}
+
+function Toggle({ value, onChange }) {
+  return (
+    <div onClick={() => onChange(!value)} style={{ width:44, height:24, borderRadius:12,
+      background: value ? T.accent : T.border, position:"relative", transition:"background .2s", cursor:"pointer", flexShrink:0 }}>
+      <div style={{ position:"absolute", top:2, left: value ? 22 : 2, width:20, height:20,
+        borderRadius:"50%", background: value ? "#0E1117" : T.muted, transition:"left .2s" }} />
+    </div>
+  );
+}
+
+function Modal({ open, onClose, title, children }) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.75)", zIndex:1000,
+      display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background:T.surface, borderRadius:"20px 20px 0 0",
+        width:"100%", maxWidth:500, maxHeight:"90vh", overflow:"auto", padding:20 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+          <span style={{ color:T.text, fontWeight:700, fontSize:17 }}>{title}</span>
+          <Btn variant="ghost" small onClick={onClose}>✕</Btn>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Tabs({ tabs, active, onChange }) {
+  return (
+    <div style={{ display:"flex", gap:4, background:T.surface, borderRadius:10, padding:4 }}>
+      {tabs.map(t => (
+        <button key={t.value} onClick={() => onChange(t.value)}
+          style={{ flex:1, padding:"8px 4px", borderRadius:8, border:"none", fontSize:12, fontWeight:600,
+            background: active===t.value ? T.card : "transparent",
+            color: active===t.value ? T.text : T.muted, transition:"all .15s" }}>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Sel({ value, onChange, children, style={} }) {
+  return (
+    <div style={{ position:"relative", ...style }}>
+      <select value={value} onChange={e => onChange(e.target.value)}
+        style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:8,
+          padding:"10px 36px 10px 12px", color: value !== "" ? T.text : T.muted,
+          fontSize:14, width:"100%", cursor:"pointer" }}>
+        {children}
+      </select>
+      <span style={{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)",
+        color:T.muted, pointerEvents:"none", fontSize:12 }}>▾</span>
+    </div>
+  );
+}
+
+// ─── Timer hook ───────────────────────────────────────────────────────────────
+function useTimer(init = 0) {
+  const [secs, setSecs] = useState(init);
+  const [running, setRunning] = useState(false);
+  const intervalRef = useRef(null);
+  const runningRef  = useRef(running);
+  runningRef.current = running;
+
+  useEffect(() => {
+    if (running) {
+      intervalRef.current = setInterval(() => setSecs(s => s + 1), 1000);
+    } else {
+      clearInterval(intervalRef.current);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [running]);
+
+  // Stable refs so callers can safely use these in useEffect([])
+  const startRef  = useRef(() => setRunning(true));
+  const pauseRef  = useRef(() => setRunning(false));
+  const toggleRef = useRef(() => setRunning(r => !r));
+
+  return {
+    secs, running,
+    start:  startRef.current,
+    pause:  pauseRef.current,
+    toggle: toggleRef.current,
+  };
+}
+
+// ─── Score computation ────────────────────────────────────────────────────────
+// Points-against rules (solo mode):
+//   wrong guess on a normal/none category  -> -1 each
+//   said_in_song                           -> -0.5 per wrong guess logged before it was called
+//   no_category (N/A) or skipped           -> 0, not counted at all
+function computeScores(players, songs, mode) {
+  const stats = {};
+  players.forEach(p => {
+    stats[p.id] = { id:p.id, name:p.name, correct:0, incorrect:0, title:[0,0], artist:[0,0], album:[0,0] };
+  });
+  (songs||[]).filter(s => !s.skipped).forEach(song => {
+    ["title","artist","album"].forEach(cat => {
+      const r = song[cat];
+      if (!r) return;
+      if (r.type === "null") {
+        // said_in_song -> -0.5 per wrong; no_category -> 0
+        const penalty = (r.reason === "said_in_song") ? 0.5 : 0;
+        if (penalty > 0 && r.incorrects) {
+          Object.entries(r.incorrects).forEach(([pid, v]) => {
+            if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v) * penalty;
+          });
+        }
+        return;
+      }
+      if (r.type === "none") {
+        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid, v]) => {
+          if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v);
+        });
+        return;
+      }
+      if (r.type === "player") {
+        if (stats[r.playerId]) {
+          stats[r.playerId].correct++;
+          stats[r.playerId][cat][0]++;
+          stats[r.playerId][cat][1]++;
+        }
+        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid, v]) => {
+          if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v);
+        });
+      }
+    });
+  });
+  return Object.values(stats);
+}
+
+function buildPlayerMap(filteredGames) {
+  const pm = {};
+  filteredGames.forEach(g => {
+    const songs = (g.songs||[]).filter(s=>!s.skipped);
+    computeScores(g.players, g.songs||[], g.mode).forEach(s => {
+      if (!pm[s.name]) pm[s.name] = { name:s.name, correct:0, incorrect:0, songsPlayed:0, minutesPlayed:0, title:[0,0], artist:[0,0], album:[0,0] };
+      pm[s.name].correct += s.correct; pm[s.name].incorrect += s.incorrect;
+      pm[s.name].songsPlayed += songs.length;
+      pm[s.name].minutesPlayed += (g.elapsedSeconds||0)/60;
+    });
+    // Category denominators: each player gets +1 possible for each scoreable category per song
+    songs.forEach(song => {
+      ["title","artist","album"].forEach(cat => {
+        const r = song[cat];
+        if (!r || r.type==="null") return;
+        // One possible point per player per scoreable category
+        g.players.forEach(p => {
+          if (pm[p.name]) pm[p.name][cat][1]++;
+        });
+        if (r.type==="player") {
+          const n = g.players.find(p=>p.id===r.playerId)?.name;
+          if (n && pm[n]) pm[n][cat][0]++;
+        }
+      });
+    });
+  });
+  return pm;
+}
+
+function buildPlaylistMap(allGames) {
+  const pl = {};
+  allGames.filter(g=>g.playlist).forEach(g => {
+    if (!pl[g.playlist]) pl[g.playlist] = { name:g.playlist, games:[] };
+    pl[g.playlist].games.push(g);
+  });
+  Object.values(pl).forEach(p => {
+    const songs = p.games.flatMap(g=>(g.songs||[]).filter(s=>!s.skipped));
+    p.totalSongs = songs.length;
+    p.totalMinutes = p.games.reduce((a,g)=>a+(g.elapsedSeconds||0)/60,0);
+    p.totalGames = p.games.length;
+    p.cats = {};
+    ["title","artist","album"].forEach(cat => {
+      p.cats[cat] = [
+        songs.filter(s=>s[cat]?.type==="player").length,
+        songs.filter(s=>s[cat] && s[cat].type!=="null").length,
+      ];
+    });
+    p.playerMap = buildPlayerMap(p.games);
+  });
+  return pl;
+}
+
+// ─── Home ─────────────────────────────────────────────────────────────────────
+function HomeScreen({ onNav, games }) {
+  const recent = [...games].sort((a,b)=>(b.startedAt||0)-(a.startedAt||0)).slice(0,3);
+  return (
+    <div style={{ padding:20, maxWidth:460, margin:"0 auto" }}>
+      <div style={{ textAlign:"center", padding:"32px 0 24px" }}>
+        <div style={{ fontSize:52, marginBottom:8 }}>🎶</div>
+        <h1 style={{ color:T.text, fontSize:28, fontWeight:900, letterSpacing:"-0.03em" }}>Song Game</h1>
+        <p style={{ color:T.muted, fontSize:13, marginTop:6 }}>Keep score. Remember everything.</p>
+      </div>
+      <Btn onClick={() => onNav("setup")} style={{ width:"100%", padding:16, fontSize:17, marginBottom:12 }}>
+        🎵 New Game
+      </Btn>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:24 }}>
+        {[["📊","Scoreboard","scoreboard"],["📜","History","history"],["💽","Playlists","playlists"],["💾","Data & Backup","data"]].map(([icon,label,s])=>(
+          <button key={s} onClick={() => onNav(s)}
+            style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:12,
+              padding:"14px 8px", color:T.text, fontSize:12, fontWeight:600,
+              cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:6 }}>
+            <span style={{ fontSize:24 }}>{icon}</span>{label}
+          </button>
+        ))}
+      </div>
+      {recent.length > 0 && <>
+        <Lbl>Recent Games</Lbl>
+        {recent.map(g => (
+          <div key={g.id} style={{ padding:"10px 0", borderBottom:`1px solid ${T.border}` }}>
+            <div style={{ color:T.text, fontSize:14, fontWeight:600 }}>{g.players.map(p=>p.name).join(" vs ")}</div>
+            <div style={{ color:T.muted, fontSize:12, marginTop:2 }}>
+              {new Date(g.startedAt).toLocaleDateString()} · {fmtTime(g.elapsedSeconds||0)}
+              {g.playlist && ` · ${g.playlist}`}
+            </div>
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
+function SetupScreen({ playlists, onStart, onBack }) {
+  const [mode, setMode] = useState("solo");
+  const [players, setPlayers] = useState(["",""]);
+  const [albumEnabled, setAlbumEnabled] = useState(false);
+  const [selPl, setSelPl] = useState("");
+  const [newPl, setNewPl] = useState("");
+  const [showNewPl, setShowNewPl] = useState(false);
+
+  const canStart = mode==="solo" ? players[0].trim() : players.filter(p=>p.trim()).length >= 2;
+
+  function handleStart() {
+    const named = players.filter(p=>p.trim()).map(n=>({ id:uid(), name:n.trim() }));
+    onStart({ mode, players:named, albumEnabled, playlist: selPl || newPl.trim() || null });
+  }
+
+  return (
+    <div style={{ padding:20, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
+        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>New Game</h2>
+      </div>
+
+      <Card style={{ marginBottom:12 }}>
+        <Lbl>Game mode</Lbl>
+        <Tabs tabs={[{label:"Solo / Team",value:"solo"},{label:"Multiplayer",value:"multi"}]} active={mode} onChange={setMode} />
+      </Card>
+
+      <Card style={{ marginBottom:12 }}>
+        <Lbl>{mode==="solo" ? "Player(s)" : "Players"}</Lbl>
+        {players.map((p,i) => (
+          <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
+            <div style={{ width:8, height:8, borderRadius:"50%", background:PC[i], flexShrink:0 }} />
+            <TInput value={p} onChange={v => setPlayers(players.map((x,j)=>j===i?v:x))}
+              placeholder={mode==="solo" ? (i===0?"Your name":`Player ${i+1}`) : `Player ${i+1}`} />
+            {(mode==="multi" ? players.length>2 : players.length>1) && (
+              <Btn variant="ghost" small onClick={() => setPlayers(players.filter((_,j)=>j!==i))} style={{ flexShrink:0 }}>✕</Btn>
+            )}
+          </div>
+        ))}
+        {players.length < 8 && (
+          <Btn variant="ghost" small onClick={() => setPlayers([...players,""])} style={{ marginTop:4 }}>
+            + Add {mode==="solo" ? "team member" : "player"}
+          </Btn>
+        )}
+        {mode==="solo" && players.length>1 && (
+          <p style={{ color:T.muted, fontSize:12, marginTop:8 }}>Team mode: stats tracked together & individually</p>
+        )}
+      </Card>
+
+      <Card style={{ marginBottom:12 }}>
+        <Lbl>Playlist</Lbl>
+        {playlists.length > 0 && (
+          <Sel value={selPl} onChange={v => { setSelPl(v); if(v) setShowNewPl(false); }} style={{ marginBottom:8 }}>
+            <option value="">— Select saved playlist —</option>
+            {playlists.map(pl => <option key={pl.id} value={pl.name}>{pl.name}</option>)}
+          </Sel>
+        )}
+        {showNewPl
+          ? <TInput value={newPl} onChange={setNewPl} placeholder="New playlist name" />
+          : <Btn variant="ghost" small onClick={() => { setShowNewPl(true); setSelPl(""); }}>+ New playlist name</Btn>
+        }
+      </Card>
+
+      <Card style={{ marginBottom:20 }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div>
+            <div style={{ color:T.text, fontSize:14, fontWeight:600 }}>Album category</div>
+            <div style={{ color:T.muted, fontSize:12 }}>Can be toggled per song too</div>
+          </div>
+          <Toggle value={albumEnabled} onChange={setAlbumEnabled} />
+        </div>
+      </Card>
+
+      <Btn onClick={handleStart} disabled={!canStart} style={{ width:"100%", padding:14, fontSize:16 }}>
+        Start Game →
+      </Btn>
+    </div>
+  );
+}
+
+// ─── In-Game ──────────────────────────────────────────────────────────────────
+function initEntry(players, albumEnabled) {
+  return {
+    title:  { guesses:{}, result:null, dqd:{} },
+    artist: { guesses:{}, result:null, dqd:{} },
+    album:  { guesses:{}, result:null, dqd:{}, enabled:albumEnabled },
+  };
+}
+
+function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists }) {
+  const timer = useTimer(game.elapsedSeconds || 0);
+  const [albumOn, setAlbumOn] = useState(game.albumEnabled);
+  const [entry, setEntry] = useState(() => initEntry(game.players, game.albumEnabled));
+  const [showEnd, setShowEnd] = useState(false);
+  const [showScores, setShowScores] = useState(false);
+
+  useEffect(() => { timer.start(); }, []);
+
+  function setResult(cat, result) {
+    setEntry(prev => ({ ...prev, [cat]: { ...prev[cat], result } }));
+  }
+
+  function handleGuess(cat, playerId, correct) {
+    if (game.mode === "multi") {
+      if (correct) setResult(cat, { type:"player", playerId });
+      else setEntry(prev => ({ ...prev, [cat]: { ...prev[cat], dqd:{ ...prev[cat].dqd, [playerId]:true } } }));
+    } else {
+      if (correct) {
+        // Record correct; also bump the guess counter by +1 (net)
+        setEntry(prev => ({
+          ...prev,
+          [cat]: {
+            ...prev[cat],
+            result: { type:"player", playerId },
+            guesses: { ...prev[cat].guesses, [playerId]: (prev[cat].guesses[playerId] || 0) + 1 },
+          }
+        }));
+      } else {
+        // Wrong guess: decrement by 1 (stored as negative = wrong)
+        setEntry(prev => ({
+          ...prev,
+          [cat]: {
+            ...prev[cat],
+            guesses: { ...prev[cat].guesses, [playerId]: (prev[cat].guesses[playerId] || 0) - 1 },
+          }
+        }));
+      }
+    }
+  }
+
+  function catResult(cat) {
+    const s = entry[cat];
+    // Build incorrects: sum of negative guesses per player (each -1 per wrong tap)
+    const incorrects = {};
+    Object.entries(s.guesses || {}).forEach(([pid, v]) => {
+      if (v < 0) incorrects[pid] = v; // keep as negative
+    });
+    if (s.result?.type==="said_in_song") return { type:"null", reason:"said_in_song", incorrects };
+    if (s.result?.type==="no_category")  return { type:"null", reason:"no_category" };
+    if (s.result?.type==="player")       return { type:"player", playerId:s.result.playerId, incorrects };
+    return { type:"none", incorrects };
+  }
+
+  function submitSong(skipped=false) {
+    const elapsed = timer.secs;
+    timer.pause();
+    const song = {
+      id:uid(), timestamp:Date.now(), skipped,
+      album_enabled: entry.album.enabled,
+      title:  skipped ? null : catResult("title"),
+      artist: skipped ? null : catResult("artist"),
+      album:  (!entry.album.enabled||skipped) ? null : catResult("album"),
+    };
+    if (game.playlist && !playlists.find(p=>p.name===game.playlist)) {
+      onSavePlaylists([...playlists, { id:uid(), name:game.playlist }]);
+    }
+    onUpdateGame({ ...game, elapsedSeconds:elapsed, songs:[...(game.songs||[]), song] });
+    setEntry(initEntry(game.players, albumOn));
+    timer.start();
+  }
+
+  const [countdown, setCountdown] = useState(null); // null | 3 | 2 | 1
+
+  function handleGotAll() {
+    // Mark all active categories as correct for the first (only) player in solo
+    const pid = game.players[0].id;
+    const activeCats = ["title","artist",...(entry.album.enabled?["album"]:[])];
+    setEntry(prev => {
+      const next = { ...prev };
+      activeCats.forEach(cat => {
+        // Only set correct if not already null (said_in_song / N/A)
+        if (!prev[cat].result || prev[cat].result.type === "player") {
+          next[cat] = { ...prev[cat], result: { type:"player", playerId:pid } };
+        }
+      });
+      return next;
+    });
+    // Start 3-second countdown
+    setCountdown(3);
+  }
+
+  // Keep a ref to submitSong so the countdown effect always calls the latest version
+  const submitSongRef = useRef(submitSong);
+  submitSongRef.current = submitSong;
+
+  // Drive countdown down each second, then submit
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown === 0) {
+      setCountdown(null);
+      submitSongRef.current(false);
+      return;
+    }
+    const t = setTimeout(() => setCountdown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [countdown]);
+
+  function cancelCountdown() {
+    setCountdown(null);
+  }
+
+  function endGame() {
+    onEndGame({ ...game, elapsedSeconds:timer.secs, endedAt:Date.now(), status:"complete" });
+  }
+
+  const cats = ["title","artist",...(entry.album.enabled?["album"]:[])];
+  const catLabels = { title:"Song Title 🎵", artist:"Artist 🎤", album:"Album 💿" };
+  const scores = computeScores(game.players, game.songs||[], game.mode);
+  const songCount = (game.songs||[]).filter(s=>!s.skipped).length;
+
+  return (
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:100 }}>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
+        <div>
+          <div style={{ color:T.accent, fontSize:24, fontWeight:800, letterSpacing:"-0.02em" }}>{fmtTime(timer.secs)}</div>
+          <div style={{ color:T.muted, fontSize:12 }}>Song {songCount + 1}</div>
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <Btn variant="secondary" small onClick={timer.toggle}>{timer.running ? "⏸" : "▶"}</Btn>
+          <Btn variant="secondary" small onClick={() => setShowScores(true)}>📊</Btn>
+          <Btn variant="danger" small onClick={() => setShowEnd(true)}>End</Btn>
+        </div>
+      </div>
+
+      {/* Album toggle */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+        background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
+        <span style={{ color:T.muted, fontSize:13 }}>Album category</span>
+        <Toggle value={albumOn} onChange={v => { setAlbumOn(v); setEntry(prev=>({...prev,album:{...prev.album,enabled:v}})); }} />
+      </div>
+
+      {cats.map(cat => (
+        <CatPanel key={cat} cat={cat} label={catLabels[cat]}
+          entry={entry[cat]} players={game.players} mode={game.mode}
+          onGuess={(pid,correct) => handleGuess(cat,pid,correct)}
+          onSetResult={r => setResult(cat,r)} />
+      ))}
+
+      {/* Action buttons */}
+      {game.mode === "solo" ? (
+        <div style={{ marginTop:8 }}>
+          {countdown !== null ? (
+            // Countdown overlay bar
+            <div style={{ background:T.surface, border:`1px solid ${T.accent}`, borderRadius:12,
+              padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <div>
+                <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>Next song in {countdown}…</div>
+                <div style={{ color:T.muted, fontSize:12, marginTop:2 }}>Tap cancel to go back</div>
+              </div>
+              <Btn variant="ghost" onClick={cancelCountdown}>Cancel</Btn>
+            </div>
+          ) : (
+            <React.Fragment>
+              {/* Primary row: Got All + Next Song */}
+              <div style={{ display:"flex", gap:10, marginBottom:10 }}>
+                <Btn variant="success" onClick={handleGotAll} style={{ flex:1 }}>
+                  ⚡ Got All →3s
+                </Btn>
+                <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:1 }}>
+                  Next Song →
+                </Btn>
+              </div>
+              {/* Skip — visually quieter, tucked below */}
+              <Btn variant="ghost" onClick={() => submitSong(true)}
+                style={{ width:"100%", fontSize:12, padding:"8px", opacity:0.6 }}>
+                Skip song (no points recorded)
+              </Btn>
+            </React.Fragment>
+          )}
+        </div>
+      ) : (
+        <div style={{ display:"flex", gap:10, marginTop:8 }}>
+          <Btn variant="ghost" onClick={() => submitSong(true)} style={{ flex:1 }}>Skip Song</Btn>
+          <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:2 }}>Next Song →</Btn>
+        </div>
+      )}
+
+      <Modal open={showEnd} onClose={() => setShowEnd(false)} title="End Game?">
+        <p style={{ color:T.muted, fontSize:14, marginBottom:16 }}>This will save the game and show the final summary.</p>
+        <div style={{ display:"flex", gap:10 }}>
+          <Btn variant="ghost" onClick={() => setShowEnd(false)} style={{ flex:1 }}>Cancel</Btn>
+          <Btn variant="danger" onClick={() => { setShowEnd(false); endGame(); }} style={{ flex:1 }}>End Game</Btn>
+        </div>
+      </Modal>
+
+      <Modal open={showScores} onClose={() => setShowScores(false)} title="Live Scores">
+        <ScoreTable scores={scores} players={game.players} mode={game.mode} />
+      </Modal>
+    </div>
+  );
+}
+
+function CatPanel({ cat, label, entry, players, mode, onGuess, onSetResult }) {
+  const resolved = !!entry.result;
+  const isCorrect = entry.result?.type === "player";
+  const isNull = entry.result?.type === "said_in_song" || entry.result?.type === "no_category";
+  // In solo mode, track wrong-guess count for display
+  const pid = players[0]?.id;
+  const wrongCount = mode === "solo" ? Math.abs(Math.min(0, entry.guesses?.[pid] || 0)) : 0;
+
+  return (
+    <Card style={{ marginBottom:12 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
+        <span style={{ color:T.text, fontWeight:700, fontSize:15 }}>{label}</span>
+        {isCorrect && <span style={{ fontSize:11, color:T.green, fontWeight:700, background:"#14532D", padding:"2px 8px", borderRadius:20 }}>✓ Got it</span>}
+        {isNull && entry.result?.type==="said_in_song" && <span style={{ fontSize:11, color:T.purple, fontWeight:700, background:`${T.purple}22`, padding:"2px 8px", borderRadius:20 }}>Said in song</span>}
+        {isNull && entry.result?.type==="no_category" && <span style={{ fontSize:11, color:T.muted, fontWeight:700, background:T.surface, padding:"2px 8px", borderRadius:20 }}>N/A</span>}
+      </div>
+
+      {/* Null option pills */}
+      <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
+        {[{key:"said_in_song",label:"Said in song",color:T.purple},{key:"no_category",label:"N/A",color:T.muted}].map(opt => (
+          <button key={opt.key}
+            onClick={() => onSetResult(entry.result?.type===opt.key ? null : { type:opt.key })}
+            style={{ padding:"5px 12px", borderRadius:20, border:`1px solid ${T.border}`, fontSize:12, fontWeight:600, cursor:"pointer",
+              background: entry.result?.type===opt.key ? opt.color : T.surface,
+              color: entry.result?.type===opt.key ? "#fff" : T.muted }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Player buttons */}
+      <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+        {players.map((p,i) => {
+          const dqd = entry.dqd?.[p.id];
+          const color = PC[i];
+
+          if (mode === "multi") {
+            return (
+              <div key={p.id}>
+                <button disabled={dqd} onClick={() => !dqd && onGuess(p.id,true)}
+                  style={{ padding:"8px 16px", borderRadius:8, border:`1px solid ${dqd?T.dq:color}`,
+                    fontSize:13, fontWeight:700, background: dqd?T.dq:`${color}22`,
+                    color: dqd?T.muted:color, textDecoration: dqd?"line-through":"none", cursor:dqd?"not-allowed":"pointer" }}>
+                  {p.name}
+                </button>
+              </div>
+            );
+          }
+
+          // Solo mode: ✗ is default-selected (shown active) but dims once correct is set
+          // Tapping ✗ when correct is set removes the correct answer (undo)
+          const xActive = !isCorrect && !isNull; // ✗ is the "current state" when nothing positive set
+          const xDimmed = isCorrect || isNull;    // dim (but still tappable) after correct/null set
+
+          return (
+            <React.Fragment key={p.id}>
+              {/* ✗ button */}
+              <button
+                onClick={() => {
+                  if (isCorrect) {
+                    // Undo correct answer — remove result, add a wrong guess
+                    onSetResult(null);
+                    onGuess(p.id, false);
+                  } else {
+                    onGuess(p.id, false);
+                  }
+                }}
+                style={{
+                  padding:"8px 14px", borderRadius:"8px 0 0 8px",
+                  border:`1px solid ${xActive ? T.red : T.border}`,
+                  background: xActive ? `${T.red}33` : T.surface,
+                  color: xActive ? T.red : T.muted,
+                  fontSize:13, fontWeight:700, cursor:"pointer",
+                  opacity: xDimmed ? 0.45 : 1,
+                  transition:"opacity .15s, background .15s",
+                }}>
+                ✗ {wrongCount > 0 && <span style={{ fontSize:11, marginLeft:2 }}>×{wrongCount}</span>}
+              </button>
+              {/* ✓ button */}
+              <button
+                onClick={() => onGuess(p.id, true)}
+                style={{
+                  padding:"8px 16px", borderRadius:"0 8px 8px 0",
+                  border:`1px solid ${isCorrect ? color : T.border}`,
+                  background: isCorrect ? `${color}33` : T.surface,
+                  color: isCorrect ? color : T.muted,
+                  fontSize:13, fontWeight:700, cursor:"pointer",
+                  transition:"background .15s",
+                }}>
+                {p.name} ✓
+              </button>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+function ScoreTable({ scores, players, mode }) {
+  return (
+    <div>
+      {[...scores].sort((a,b)=>b.correct-a.correct).map((s,i) => {
+        const pIdx = players.findIndex(p=>p.name===s.name);
+        const color = PC[pIdx >= 0 ? pIdx % PC.length : i % PC.length];
+        return (
+        <div key={s.name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          padding:"10px 0", borderBottom: i<scores.length-1?`1px solid ${T.border}`:"none" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <div style={{ width:28, height:28, borderRadius:"50%", display:"flex", alignItems:"center",
+              justifyContent:"center", background:color,
+              color:"#0E1117", fontWeight:800, fontSize:12 }}>
+              {s.name[0]?.toUpperCase()}
+            </div>
+            <span style={{ color:T.text, fontWeight:600 }}>{s.name}</span>
+          </div>
+          <div style={{ textAlign:"right" }}>
+            <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{s.correct}</div>
+            {mode==="solo" && s.incorrect>0 && <div style={{ color:T.red, fontSize:11 }}>-{Number.isInteger(s.incorrect) ? s.incorrect : s.incorrect.toFixed(1)} ✗</div>}
+          </div>
+        </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Summary ──────────────────────────────────────────────────────────────────
+function SummaryScreen({ game, onHome }) {
+  const songs = (game.songs||[]).filter(s=>!s.skipped);
+  const scores = [...computeScores(game.players, game.songs||[], game.mode)].sort((a,b)=>b.correct-a.correct);
+  return (
+    <div style={{ padding:20, maxWidth:460, margin:"0 auto" }}>
+      <div style={{ textAlign:"center", marginBottom:24 }}>
+        <div style={{ fontSize:44, marginBottom:8 }}>🎉</div>
+        <h2 style={{ color:T.text, fontSize:22, fontWeight:800 }}>Game Over!</h2>
+        <div style={{ color:T.muted, fontSize:13, marginTop:4 }}>
+          {songs.length} songs · {fmtTime(game.elapsedSeconds||0)}{game.playlist && ` · ${game.playlist}`}
+        </div>
+      </div>
+
+      <Card style={{ marginBottom:14 }}>
+        <Lbl>Final Scores</Lbl>
+        {scores.map((s,i) => (
+          <div key={s.name} style={{ display:"flex", alignItems:"center", gap:12,
+            padding:"10px 0", borderBottom: i<scores.length-1?`1px solid ${T.border}`:"none" }}>
+            <span style={{ color:i===0?T.accent:T.muted, fontSize:18, width:24 }}>
+              {i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}
+            </span>
+            <span style={{ color:T.text, fontWeight:700, flex:1 }}>{s.name}</span>
+            <div style={{ textAlign:"right" }}>
+              <span style={{ color:T.accent, fontWeight:800, fontSize:20 }}>{s.correct}</span>
+              {game.mode==="solo" && s.incorrect>0 && <span style={{ color:T.red, fontSize:12, marginLeft:6 }}>-{Number.isInteger(s.incorrect) ? s.incorrect : s.incorrect.toFixed(1)}</span>}
+            </div>
+          </div>
+        ))}
+      </Card>
+
+      <Card style={{ marginBottom:20 }}>
+        <Lbl>Category breakdown</Lbl>
+        {["title","artist","album"].filter(c=>c!=="album"||game.albumEnabled).map(cat => {
+          const possible = songs.filter(s=>s[cat] && s[cat].type!=="null").length;
+          const scored   = songs.filter(s=>s[cat]?.type==="player").length;
+          return (
+            <div key={cat} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:`1px solid ${T.border}` }}>
+              <span style={{ color:T.muted, textTransform:"capitalize" }}>{cat}</span>
+              <span style={{ color:T.text }}>{fmtPct(scored,possible)} ({scored}/{possible})</span>
+            </div>
+          );
+        })}
+      </Card>
+
+      <Btn onClick={onHome} style={{ width:"100%", padding:14, fontSize:16 }}>Back to Home</Btn>
+    </div>
+  );
+}
+
+// ─── Scoreboard ───────────────────────────────────────────────────────────────
+function ScoreboardScreen({ games, onBack }) {
+  const [tab, setTab]           = useState("rankings");
+  const [sortBy, setSortBy]     = useState("points");
+  const [sortDir, setSortDir]   = useState("desc");
+  const [fMode, setFMode]       = useState("all");
+  const [fPl, setFPl]           = useState("all");
+  const [detailP, setDetailP]   = useState(null);
+  const [statsP, setStatsP]     = useState(null);
+  const [detailPl, setDetailPl] = useState(null);
+
+  const allPl = [...new Set(games.filter(g=>g.playlist).map(g=>g.playlist))];
+  const filtered = games.filter(g => (fMode==="all"||g.mode===fMode) && (fPl==="all"||g.playlist===fPl));
+  const playerMap   = buildPlayerMap(filtered);
+  const playlistMap = buildPlaylistMap(games);
+
+  const sorted = [...Object.values(playerMap)].sort((a,b) => {
+    let va, vb;
+    if (sortBy==="points")     { va=a.correct; vb=b.correct; }
+    else if (sortBy==="ratio") { va=a.incorrect?a.correct/a.incorrect:a.correct; vb=b.incorrect?b.correct/b.incorrect:b.correct; }
+    else                       { va=a.minutesPlayed?a.correct/a.minutesPlayed:0; vb=b.minutesPlayed?b.correct/b.minutesPlayed:0; }
+    return sortDir==="desc" ? vb-va : va-vb;
+  }).slice(0,10);
+
+  return (
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Scoreboard</h2>
+      </div>
+
+      {tab !== "playlists" && (
+        <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+          <Sel value={fMode} onChange={setFMode} style={{ flex:1 }}>
+            <option value="all">All modes</option>
+            <option value="solo">Solo/Team</option>
+            <option value="multi">Multiplayer</option>
+          </Sel>
+          {allPl.length > 0 && (
+            <Sel value={fPl} onChange={setFPl} style={{ flex:1 }}>
+              <option value="all">All playlists</option>
+              {allPl.map(p => <option key={p} value={p}>{p}</option>)}
+            </Sel>
+          )}
+        </div>
+      )}
+
+      <Tabs tabs={[{label:"Rankings",value:"rankings"},{label:"Players",value:"stats"},{label:"Playlists",value:"playlists"}]}
+        active={tab} onChange={v => { setTab(v); setDetailP(null); setStatsP(null); setDetailPl(null); }} />
+      <div style={{ marginBottom:14 }} />
+
+      {/* Rankings */}
+      {tab==="rankings" && <>
+        <div style={{ display:"flex", gap:6, marginBottom:12 }}>
+          {[["points","Most Pts"],["ratio","+/- Ratio"],["ppm","Pts/Min"]].map(([v,l]) => (
+            <button key={v}
+              onClick={() => { if(sortBy===v) setSortDir(d=>d==="desc"?"asc":"desc"); else{setSortBy(v);setSortDir("desc");} }}
+              style={{ flex:1, padding:"7px 4px", borderRadius:8, border:`1px solid ${sortBy===v?T.accent:T.border}`,
+                background: sortBy===v?`${T.accent}22`:T.card, color: sortBy===v?T.accent:T.muted,
+                fontSize:11, fontWeight:600, cursor:"pointer" }}>
+              {l} {sortBy===v?(sortDir==="desc"?"↓":"↑"):""}
+            </button>
+          ))}
+        </div>
+        {sorted.length===0
+          ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No games yet</div>
+          : sorted.map((r,i) => (
+            <Card key={r.name} style={{ marginBottom:8 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <span style={{ color:i<3?T.accent:T.muted, fontSize:16, width:24 }}>
+                  {i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}
+                </span>
+                <div style={{ flex:1 }}>
+                  <div style={{ color:T.text, fontWeight:700 }}>{r.name}</div>
+                  <div style={{ color:T.muted, fontSize:11 }}>{Math.round(r.minutesPlayed)}m · {r.songsPlayed} songs</div>
+                </div>
+                <div style={{ textAlign:"right", marginRight:4 }}>
+                  <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{r.correct}</div>
+                  <div style={{ color:T.muted, fontSize:11 }}>{r.minutesPlayed>0?(r.correct/r.minutesPlayed).toFixed(1):"—"}/min</div>
+                </div>
+                <Btn variant="ghost" small onClick={() => setDetailP(r.name)}>→</Btn>
+              </div>
+            </Card>
+          ))
+        }
+        <Modal open={!!detailP} onClose={() => setDetailP(null)} title={detailP||""}>
+          {detailP && playerMap[detailP] && <PlayerStatsCard p={playerMap[detailP]} />}
+        </Modal>
+      </>}
+
+      {/* Player Stats */}
+      {tab==="stats" && <>
+        <Sel value={statsP||""} onChange={v=>setStatsP(v||null)} style={{ marginBottom:12 }}>
+          <option value="">— Select player —</option>
+          {Object.keys(playerMap).map(n => <option key={n} value={n}>{n}</option>)}
+        </Sel>
+        {statsP && playerMap[statsP] && <PlayerStatsCard p={playerMap[statsP]} />}
+      </>}
+
+      {/* Playlists */}
+      {tab==="playlists" && <PlaylistTab playlistMap={playlistMap} detailPl={detailPl} setDetailPl={setDetailPl} />}
+    </div>
+  );
+}
+
+function PlayerStatsCard({ p }) {
+  return (
+    <div>
+      {[["Points",p.correct,T.accent],
+        ["Wrong guesses", p.incorrect > 0 ? (Number.isInteger(p.incorrect) ? p.incorrect : p.incorrect.toFixed(1)) : 0, T.red],
+        ["Pts / Min",p.minutesPlayed>0?(p.correct/p.minutesPlayed).toFixed(2):"—",T.blue],
+        ["+/- Ratio",p.incorrect?(p.correct/p.incorrect).toFixed(2):p.correct>0?"∞":"—",T.green],
+        ["Minutes",Math.round(p.minutesPlayed),T.muted],
+        ["Songs",p.songsPlayed,T.muted]
+      ].map(([label,val,color]) => (
+        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:`1px solid ${T.border}` }}>
+          <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
+          <span style={{ color, fontWeight:700 }}>{val}</span>
+        </div>
+      ))}
+      <div style={{ marginTop:12 }}>
+        <Lbl>Category %</Lbl>
+        {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => (
+          <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:`1px solid ${T.border}` }}>
+            <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
+            <span style={{ color:T.text, fontSize:13 }}>{fmtPct(p[k][0],p[k][1])} ({p[k][0]}/{p[k][1]})</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlaylistTab({ playlistMap, detailPl, setDetailPl }) {
+  const [expPlayer, setExpPlayer] = useState(null);
+  const pls = Object.values(playlistMap);
+  const sel = detailPl ? playlistMap[detailPl] : null;
+  if (pls.length===0) return <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No playlists recorded yet</div>;
+  return (
+    <>
+      {pls.map(pl => (
+        <Card key={pl.name} style={{ marginBottom:10 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ fontSize:22 }}>💽</span>
+            <div style={{ flex:1 }}>
+              <div style={{ color:T.text, fontWeight:700, fontSize:14 }}>{pl.name}</div>
+              <div style={{ color:T.muted, fontSize:11, marginTop:2 }}>
+                {pl.totalGames} game{pl.totalGames!==1?"s":""} · {pl.totalSongs} songs · {Math.round(pl.totalMinutes)}m
+              </div>
+              <div style={{ display:"flex", gap:6, marginTop:5, flexWrap:"wrap" }}>
+                {[["🎵","title"],["🎤","artist"],["💿","album"]].map(([icon,cat]) => {
+                  const [c,p] = pl.cats[cat];
+                  if (!p) return null;
+                  return <span key={cat} style={{ fontSize:11, color:T.muted, background:T.surface, padding:"2px 7px", borderRadius:20 }}>{icon} {fmtPct(c,p)}</span>;
+                })}
+              </div>
+            </div>
+            <Btn variant="ghost" small onClick={() => { setDetailPl(pl.name); setExpPlayer(null); }}>→</Btn>
+          </div>
+        </Card>
+      ))}
+      <Modal open={!!sel} onClose={() => setDetailPl(null)} title={sel?.name||""}>
+        {sel && <PlaylistDetail pl={sel} expPlayer={expPlayer} setExpPlayer={setExpPlayer} />}
+      </Modal>
+    </>
+  );
+}
+
+function PlaylistDetail({ pl, expPlayer, setExpPlayer }) {
+  const players = [...Object.values(pl.playerMap)].sort((a,b)=>b.correct-a.correct);
+  return (
+    <div>
+      <div style={{ marginBottom:14 }}>
+        {[["Games",pl.totalGames],["Songs",pl.totalSongs],["Time",`${Math.round(pl.totalMinutes)}m`]].map(([l,v]) => (
+          <div key={l} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
+            <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
+            <span style={{ color:T.text, fontWeight:700 }}>{v}</span>
+          </div>
+        ))}
+      </div>
+      <Lbl>Overall Category %</Lbl>
+      <div style={{ marginBottom:14 }}>
+        {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => {
+          const [c,p] = pl.cats[k];
+          if (!p) return null;
+          const pct = Math.round((c/p)*100);
+          return (
+            <div key={k} style={{ marginBottom:10 }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
+                <span style={{ color:T.text, fontSize:13, fontWeight:600 }}>{fmtPct(c,p)} ({c}/{p})</span>
+              </div>
+              <div style={{ height:6, borderRadius:3, background:T.border }}>
+                <div style={{ height:6, borderRadius:3, width:`${pct}%`, background:`linear-gradient(90deg,${T.accent},${T.accentL})` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {players.length>0 && <>
+        <Lbl>Players on this playlist</Lbl>
+        {players.map((p,i) => (
+          <div key={p.name}>
+            <div onClick={() => setExpPlayer(expPlayer===p.name?null:p.name)}
+              style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0", borderBottom:`1px solid ${T.border}`, cursor:"pointer" }}>
+              <div style={{ width:28, height:28, borderRadius:"50%", flexShrink:0, background:PC[i%PC.length],
+                display:"flex", alignItems:"center", justifyContent:"center", color:"#0E1117", fontWeight:800, fontSize:12 }}>
+                {p.name[0]?.toUpperCase()}
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ color:T.text, fontWeight:700, fontSize:14 }}>{p.name}</div>
+                <div style={{ color:T.muted, fontSize:11 }}>{p.songsPlayed} songs · {Math.round(p.minutesPlayed)}m</div>
+              </div>
+              <div style={{ textAlign:"right", marginRight:8 }}>
+                <div style={{ color:T.accent, fontWeight:800, fontSize:16 }}>{p.correct}</div>
+                {p.incorrect>0 && <div style={{ color:T.red, fontSize:11 }}>-{p.incorrect}</div>}
+              </div>
+              <span style={{ color:T.muted, fontSize:14, display:"inline-block", transform:expPlayer===p.name?"rotate(90deg)":"none", transition:"transform .15s" }}>›</span>
+            </div>
+            {expPlayer===p.name && (
+              <div style={{ background:T.surface, borderRadius:10, padding:12, margin:"6px 0 10px" }}>
+                {[["Points",p.correct,T.accent],["Wrong",p.incorrect,T.red],
+                  ["Pts/Min",p.minutesPlayed>0?(p.correct/p.minutesPlayed).toFixed(2):"—",T.blue],
+                  ["+/-",p.incorrect?(p.correct/p.incorrect).toFixed(2):p.correct>0?"∞":"—",T.green]
+                ].map(([l,v,c]) => (
+                  <div key={l} style={{ display:"flex", justifyContent:"space-between", padding:"5px 0", borderBottom:`1px solid ${T.border}` }}>
+                    <span style={{ color:T.muted, fontSize:12 }}>{l}</span>
+                    <span style={{ color:c, fontWeight:700, fontSize:12 }}>{v}</span>
+                  </div>
+                ))}
+                {[["title","Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => {
+                  const [c,pos] = p[k]; if (!pos) return null;
+                  return (
+                    <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"5px 0", borderBottom:`1px solid ${T.border}` }}>
+                      <span style={{ color:T.muted, fontSize:12 }}>{l}</span>
+                      <span style={{ color:T.text, fontSize:12 }}>{fmtPct(c,pos)} ({c}/{pos})</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </>}
+    </div>
+  );
+}
+
+// ─── History ──────────────────────────────────────────────────────────────────
+function HistoryScreen({ games, onUpdateGames, onBack }) {
+  const [search, setSearch] = useState("");
+  const [fMode, setFMode]   = useState("all");
+  const [editGame, setEditGame] = useState(null);
+
+  const filtered = games.filter(g => {
+    if (fMode!=="all" && g.mode!==fMode) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      return g.players.map(p=>p.name.toLowerCase()).join(" ").includes(q) ||
+             (g.playlist||"").toLowerCase().includes(q);
+    }
+    return true;
+  }).sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
+
+  function saveEdit(updated) {
+    const idx = games.findIndex(g=>g.id===updated.id);
+    if (idx===-1) return;
+    const ng = [...games]; ng[idx]=updated;
+    onUpdateGames(ng); setEditGame(null);
+  }
+
+  return (
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Game History</h2>
+      </div>
+
+      <TInput value={search} onChange={setSearch} placeholder="Search by player or playlist…" style={{ marginBottom:10 }} />
+
+      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        {[["all","All"],["solo","Solo"],["multi","Multi"]].map(([v,l]) => (
+          <button key={v} onClick={() => setFMode(v)}
+            style={{ flex:1, padding:"7px", borderRadius:8,
+              border:`1px solid ${fMode===v?T.accent:T.border}`,
+              background: fMode===v?`${T.accent}22`:T.card,
+              color: fMode===v?T.accent:T.muted, fontSize:12, fontWeight:600, cursor:"pointer" }}>
+            {l}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length===0
+        ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No games found</div>
+        : filtered.map(g => (
+          <Card key={g.id} style={{ marginBottom:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+              <div style={{ flex:1, marginRight:10 }}>
+                <div style={{ color:T.text, fontWeight:700, fontSize:14 }}>{g.players.map(p=>p.name).join(", ")}</div>
+                <div style={{ color:T.muted, fontSize:12, marginTop:2 }}>
+                  {new Date(g.startedAt).toLocaleDateString()} · {fmtTime(g.elapsedSeconds||0)} · {(g.songs||[]).filter(s=>!s.skipped).length} songs
+                  {g.playlist && ` · ${g.playlist}`}
+                </div>
+                <div style={{ display:"flex", gap:8, marginTop:6, flexWrap:"wrap" }}>
+                  {computeScores(g.players, g.songs||[], g.mode).map(s => (
+                    <span key={s.name} style={{ fontSize:12, color:T.accent, fontWeight:700 }}>{s.name}: {s.correct}</span>
+                  ))}
+                </div>
+              </div>
+              <Btn variant="ghost" small onClick={() => setEditGame({...g})}>Edit</Btn>
+            </div>
+          </Card>
+        ))
+      }
+
+      <Modal open={!!editGame} onClose={() => setEditGame(null)} title="Edit Game">
+        {editGame && <GameEditForm game={editGame} onChange={setEditGame} onSave={saveEdit} onCancel={() => setEditGame(null)} />}
+      </Modal>
+    </div>
+  );
+}
+
+function GameEditForm({ game, onChange, onSave, onCancel }) {
+  return (
+    <div>
+      <Lbl>Playlist</Lbl>
+      <TInput value={game.playlist||""} onChange={v=>onChange({...game,playlist:v})} placeholder="Playlist name" style={{ marginBottom:14 }} />
+      <Lbl>Player Names</Lbl>
+      {game.players.map((p,i) => (
+        <div key={p.id} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+          <div style={{ width:8, height:8, borderRadius:"50%", background:PC[i], flexShrink:0 }} />
+          <TInput value={p.name}
+            onChange={v => onChange({ ...game, players:game.players.map((pl,j)=>j===i?{...pl,name:v}:pl) })} />
+        </div>
+      ))}
+      <Lbl style={{ marginTop:14 }}>Songs</Lbl>
+      <div style={{ maxHeight:180, overflow:"auto", marginBottom:14 }}>
+        {(game.songs||[]).map((s,si) => (
+          <div key={s.id} style={{ padding:"8px 0", borderBottom:`1px solid ${T.border}`,
+            display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ color:s.skipped?T.muted:T.text, fontSize:13 }}>Song {si+1}{s.skipped?" (skipped)":""}</span>
+            <div style={{ display:"flex", gap:4, flexWrap:"wrap", justifyContent:"flex-end" }}>
+              {["title","artist","album"].map(cat => {
+                const r = s[cat]; if (!r) return null;
+                const w = r.type==="player" ? game.players.find(p=>p.id===r.playerId)?.name : r.type;
+                return <span key={cat} style={{ fontSize:10, color:T.muted, background:T.surface, padding:"2px 5px", borderRadius:4 }}>{cat[0].toUpperCase()}: {w||"—"}</span>;
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display:"flex", gap:10 }}>
+        <Btn variant="ghost" onClick={onCancel} style={{ flex:1 }}>Cancel</Btn>
+        <Btn variant="primary" onClick={() => onSave(game)} style={{ flex:1 }}>Save</Btn>
+      </div>
+    </div>
+  );
+}
+
+// ─── Playlists Manager ────────────────────────────────────────────────────────
+function PlaylistScreen({ playlists, onUpdate, onBack }) {
+  const [name, setName] = useState("");
+  function add() {
+    if (!name.trim() || playlists.find(p=>p.name===name.trim())) return;
+    onUpdate([...playlists, { id:uid(), name:name.trim() }]);
+    setName("");
+  }
+  return (
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Playlists</h2>
+      </div>
+      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        <TInput value={name} onChange={setName} placeholder="New playlist name" />
+        <Btn onClick={add} disabled={!name.trim()}>Add</Btn>
+      </div>
+      {playlists.length===0
+        ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No playlists saved yet</div>
+        : playlists.map(pl => (
+          <Card key={pl.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ color:T.text, fontWeight:600 }}>🎵 {pl.name}</span>
+            <Btn variant="danger" small onClick={() => onUpdate(playlists.filter(p=>p.id!==pl.id))}>Remove</Btn>
+          </Card>
+        ))
+      }
+    </div>
+  );
+}
+
+// ─── Data Screen (export / import) ───────────────────────────────────────────
+function DataScreen({ games, playlists, onImport, onBack }) {
+  const [importText, setImportText] = useState("");
+  const [importMode, setImportMode] = useState("merge"); // merge | replace
+  const [status, setStatus]         = useState(null);   // { ok, msg }
+  const fileRef = useRef(null);
+
+  // ── Export ──────────────────────────────────────────────────────────────────
+  function doExport() {
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      games,
+      playlists,
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `song-game-backup-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus({ ok:true, msg:`Exported ${games.length} game${games.length!==1?"s":""} and ${playlists.length} playlist${playlists.length!==1?"s":""}.` });
+  }
+
+  // ── Import from file picker ──────────────────────────────────────────────────
+  function onFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setImportText(ev.target.result);
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  // ── Parse & apply import ────────────────────────────────────────────────────
+  function doImport() {
+    let parsed;
+    try {
+      parsed = JSON.parse(importText.trim());
+    } catch {
+      setStatus({ ok:false, msg:"Invalid JSON — couldn't parse the file." });
+      return;
+    }
+    if (!Array.isArray(parsed.games) || !Array.isArray(parsed.playlists)) {
+      setStatus({ ok:false, msg:"File doesn't look like a Song Game backup (missing games or playlists arrays)." });
+      return;
+    }
+
+    let newGames, newPlaylists;
+    if (importMode === "replace") {
+      newGames     = parsed.games;
+      newPlaylists = parsed.playlists;
+    } else {
+      // Merge: keep existing, add anything from import whose id doesn't already exist
+      const existingGameIds = new Set(games.map(g=>g.id));
+      const existingPlIds   = new Set(playlists.map(p=>p.id));
+      const addedGames = parsed.games.filter(g => !existingGameIds.has(g.id));
+      const addedPl    = parsed.playlists.filter(p => !existingPlIds.has(p.id));
+      newGames     = [...games, ...addedGames];
+      newPlaylists = [...playlists, ...addedPl];
+      setStatus({ ok:true, msg:`Merged: added ${addedGames.length} new game${addedGames.length!==1?"s":""} and ${addedPl.length} new playlist${addedPl.length!==1?"s":""}.` });
+    }
+
+    onImport(newGames, newPlaylists);
+    setImportText("");
+    if (importMode === "replace") {
+      setStatus({ ok:true, msg:`Replaced with ${newGames.length} game${newGames.length!==1?"s":""} and ${newPlaylists.length} playlist${newPlaylists.length!==1?"s":""}.` });
+    }
+  }
+
+  return (
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
+        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Data & Backup</h2>
+      </div>
+
+      {/* Status banner */}
+      {status && (
+        <div style={{ background: status.ok ? "#14532D" : "#7F1D1D",
+          border: `1px solid ${status.ok ? "#166534" : "#991B1B"}`,
+          borderRadius:10, padding:"12px 14px", marginBottom:16,
+          display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
+          <span style={{ color: status.ok ? T.green : "#FCA5A5", fontSize:14 }}>
+            {status.ok ? "✓ " : "✗ "}{status.msg}
+          </span>
+          <button onClick={() => setStatus(null)} style={{ background:"none", color:T.muted, fontSize:16, flexShrink:0 }}>✕</button>
+        </div>
+      )}
+
+      {/* Export */}
+      <Card style={{ marginBottom:14 }}>
+        <Lbl>Export</Lbl>
+        <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
+          Downloads a <code style={{ color:T.accent, fontSize:12 }}>.json</code> backup file containing all your games and playlists. Keep this somewhere safe.
+        </p>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
+          <span style={{ color:T.muted, fontSize:13 }}>Games saved</span>
+          <span style={{ color:T.text, fontWeight:700 }}>{games.length}</span>
+        </div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
+          <span style={{ color:T.muted, fontSize:13 }}>Playlists saved</span>
+          <span style={{ color:T.text, fontWeight:700 }}>{playlists.length}</span>
+        </div>
+        <Btn onClick={doExport} style={{ width:"100%" }}>⬇ Download Backup</Btn>
+      </Card>
+
+      {/* Import */}
+      <Card>
+        <Lbl>Import</Lbl>
+        <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
+          Load a previously exported backup file. Choose whether to merge with existing data or replace it entirely.
+        </p>
+
+        {/* Import mode toggle */}
+        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+          {[["merge","Merge"],["replace","Replace all"]].map(([v,l]) => (
+            <button key={v} onClick={() => setImportMode(v)}
+              style={{ flex:1, padding:"8px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
+                border:`1px solid ${importMode===v ? T.accent : T.border}`,
+                background: importMode===v ? `${T.accent}22` : T.surface,
+                color: importMode===v ? T.accent : T.muted }}>
+              {l}
+            </button>
+          ))}
+        </div>
+        <p style={{ color:T.muted, fontSize:12, marginBottom:14, lineHeight:1.4 }}>
+          {importMode==="merge"
+            ? "Adds new games and playlists from the file. Anything already in your data (matched by ID) is left untouched."
+            : "⚠️ Overwrites all current data with the file contents. Your existing games and playlists will be lost."}
+        </p>
+
+        {/* File picker */}
+        <input ref={fileRef} type="file" accept=".json,application/json" onChange={onFileChange}
+          style={{ display:"none" }} />
+        <Btn variant="secondary" onClick={() => fileRef.current.click()} style={{ width:"100%", marginBottom:10 }}>
+          📂 Choose File…
+        </Btn>
+
+        {/* Paste fallback */}
+        {importText ? (
+          <div style={{ background:T.surface, borderRadius:8, padding:"10px 12px", marginBottom:10,
+            display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <span style={{ color:T.green, fontSize:13 }}>✓ File loaded ({(importText.length/1024).toFixed(1)} KB)</span>
+            <button onClick={() => setImportText("")} style={{ background:"none", color:T.muted, fontSize:14 }}>✕</button>
+          </div>
+        ) : (
+          <details style={{ marginBottom:10 }}>
+            <summary style={{ color:T.muted, fontSize:12, cursor:"pointer", userSelect:"none" }}>Or paste JSON manually</summary>
+            <textarea value={importText} onChange={e=>setImportText(e.target.value)}
+              placeholder='{"version":1,"games":[...],"playlists":[...]}'
+              style={{ width:"100%", marginTop:8, background:T.surface, border:`1px solid ${T.border}`,
+                borderRadius:8, padding:"10px 12px", color:T.text, fontSize:12,
+                resize:"vertical", minHeight:80, outline:"none", fontFamily:"monospace" }} />
+          </details>
+        )}
+
+        <Btn onClick={doImport} disabled={!importText.trim()} variant={importMode==="replace" ? "danger" : "primary"}
+          style={{ width:"100%" }}>
+          {importMode==="replace" ? "⚠️ Replace & Import" : "⬆ Merge & Import"}
+        </Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ─── App root ─────────────────────────────────────────────────────────────────
+function App() {
+  const [screen, setScreen]           = useState("home");
+  const [games, setGames]             = useState(() => loadData(KEYS.games));
+  const [playlists, setPlaylists]     = useState(() => loadData(KEYS.playlists));
+  const [currentGame, setCurrentGame] = useState(null);
+
+  function updateGames(ng)  { setGames(ng);   saveData(KEYS.games, ng); }
+  function updatePl(np)     { setPlaylists(np); saveData(KEYS.playlists, np); }
+
+  function importData(newGames, newPlaylists) {
+    updateGames(newGames);
+    updatePl(newPlaylists);
+  }
+
+  function startGame(config) {
+    const game = {
+      id:uid(), startedAt:Date.now(), status:"active",
+      mode:config.mode, players:config.players, albumEnabled:config.albumEnabled,
+      playlist:config.playlist, songs:[], elapsedSeconds:0,
+    };
+    setCurrentGame(game);
+    setScreen("game");
+  }
+
+  function endGame(finalGame) {
+    const ng = [finalGame, ...games];
+    updateGames(ng);
+    setCurrentGame(null);
+    setScreen("summary_" + finalGame.id);
+  }
+
+  const summaryId = screen.startsWith("summary_") ? screen.slice("summary_".length) : null;
+
+  if (screen==="home")        return <HomeScreen onNav={setScreen} games={games} />;
+  if (screen==="setup")       return <SetupScreen playlists={playlists} onStart={startGame} onBack={() => setScreen("home")} />;
+  if (screen==="game" && currentGame)
+    return <GameScreen game={currentGame} onUpdateGame={setCurrentGame} onEndGame={endGame}
+              playlists={playlists} onSavePlaylists={updatePl} />;
+  if (summaryId) {
+    const g = games.find(g=>g.id===summaryId);
+    if (g) return <SummaryScreen game={g} onHome={() => setScreen("home")} />;
+  }
+  if (screen==="scoreboard")  return <ScoreboardScreen games={games} onBack={() => setScreen("home")} />;
+  if (screen==="history")     return <HistoryScreen games={games} onUpdateGames={updateGames} onBack={() => setScreen("home")} />;
+  if (screen==="playlists")   return <PlaylistScreen playlists={playlists} onUpdate={updatePl} onBack={() => setScreen("home")} />;
+  if (screen==="data")        return <DataScreen games={games} playlists={playlists} onImport={importData} onBack={() => setScreen("home")} />;
+  return <HomeScreen onNav={setScreen} games={games} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
