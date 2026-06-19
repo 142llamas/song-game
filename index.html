@@ -22,6 +22,23 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
 
+// ─── Firebase config — fill in your project values ───────────────────────────
+// Replace these with the values from your Firebase project settings.
+// Realtime Database → your project → Project Settings → Your apps → Config
+const FB = {
+  dbUrl: "https://song-game-739c7-default-rtdb.firebaseio.com/", // e.g. https://my-song-game-default-rtdb.firebaseio.com
+};
+// In your Firebase Realtime Database rules, add a TTL cleanup rule or simply
+// set rules to allow read/write (for personal use). Suggested rules:
+// {
+//   "rules": {
+//     "shares": {
+//       ".read": true,
+//       ".write": true
+//     }
+//   }
+// }
+
 // ─── Storage (localStorage) ───────────────────────────────────────────────────
 const KEYS = { games: "sg_games", playlists: "sg_playlists" };
 function loadData(key) {
@@ -139,7 +156,28 @@ function Sel({ value, onChange, children, style={} }) {
   );
 }
 
-// ─── Timer hook ───────────────────────────────────────────────────────────────
+function PlaylistLink({ url, style={} }) {
+  if (!url) return null;
+  // Detect platform for a nice label
+  let label = "Open playlist ↗";
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    if (h.includes("spotify"))    label = "🟢 Open in Spotify ↗";
+    else if (h.includes("apple")) label = "🎵 Open in Apple Music ↗";
+    else if (h.includes("youtube") || h.includes("youtu.be")) label = "▶️ Open on YouTube ↗";
+    else if (h.includes("tidal")) label = "💠 Open in Tidal ↗";
+    else if (h.includes("deezer")) label = "🎶 Open in Deezer ↗";
+  } catch {}
+  return (
+    <a href={url} target="_blank" rel="noopener noreferrer"
+      style={{ display:"inline-flex", alignItems:"center", gap:4,
+        fontSize:12, color:T.blue, textDecoration:"none", fontWeight:600, ...style }}>
+      {label}
+    </a>
+  );
+}
+
+
 function useTimer(init = 0) {
   const [secs, setSecs] = useState(init);
   const [running, setRunning] = useState(false);
@@ -243,13 +281,16 @@ function buildPlayerMap(filteredGames) {
   return pm;
 }
 
-function buildPlaylistMap(allGames) {
+function buildPlaylistMap(allGames, allPlaylists) {
   const pl = {};
   allGames.filter(g=>g.playlist).forEach(g => {
     if (!pl[g.playlist]) pl[g.playlist] = { name:g.playlist, games:[] };
     pl[g.playlist].games.push(g);
   });
   Object.values(pl).forEach(p => {
+    // Attach URL from playlists store or from any game that has it
+    const plObj = (allPlaylists||[]).find(x=>x.name===p.name);
+    p.url = plObj?.url || p.games.find(g=>g.playlistUrl)?.playlistUrl || null;
     const songs = p.games.flatMap(g=>(g.songs||[]).filter(s=>!s.skipped));
     p.totalSongs = songs.length;
     p.totalMinutes = p.games.reduce((a,g)=>a+(g.elapsedSeconds||0)/60,0);
@@ -298,6 +339,7 @@ function HomeScreen({ onNav, games }) {
               {new Date(g.startedAt).toLocaleDateString()} · {fmtTime(g.elapsedSeconds||0)}
               {g.playlist && ` · ${g.playlist}`}
             </div>
+            {g.playlistUrl && <PlaylistLink url={g.playlistUrl} style={{ marginTop:4 }} />}
           </div>
         ))}
       </>}
@@ -312,13 +354,18 @@ function SetupScreen({ playlists, onStart, onBack }) {
   const [albumEnabled, setAlbumEnabled] = useState(false);
   const [selPl, setSelPl] = useState("");
   const [newPl, setNewPl] = useState("");
+  const [newPlUrl, setNewPlUrl] = useState("");
   const [showNewPl, setShowNewPl] = useState(false);
 
   const canStart = mode==="solo" ? players[0].trim() : players.filter(p=>p.trim()).length >= 2;
 
+  // Find URL for selected saved playlist
+  const selPlObj = selPl ? playlists.find(p => p.name === selPl) : null;
+
   function handleStart() {
     const named = players.filter(p=>p.trim()).map(n=>({ id:uid(), name:n.trim() }));
-    onStart({ mode, players:named, albumEnabled, playlist: selPl || newPl.trim() || null });
+    const playlistUrl = selPlObj?.url || (showNewPl ? newPlUrl.trim() : "") || null;
+    onStart({ mode, players:named, albumEnabled, playlist: selPl || newPl.trim() || null, playlistUrl });
   }
 
   return (
@@ -363,10 +410,19 @@ function SetupScreen({ playlists, onStart, onBack }) {
             {playlists.map(pl => <option key={pl.id} value={pl.name}>{pl.name}</option>)}
           </Sel>
         )}
-        {showNewPl
-          ? <TInput value={newPl} onChange={setNewPl} placeholder="New playlist name" />
-          : <Btn variant="ghost" small onClick={() => { setShowNewPl(true); setSelPl(""); }}>+ New playlist name</Btn>
-        }
+        {selPlObj?.url && (
+          <div style={{ marginBottom:8 }}>
+            <PlaylistLink url={selPlObj.url} />
+          </div>
+        )}
+        {showNewPl ? (
+          <div>
+            <TInput value={newPl} onChange={setNewPl} placeholder="New playlist name" style={{ marginBottom:8 }} />
+            <TInput value={newPlUrl} onChange={setNewPlUrl} placeholder="Playlist URL (optional — Spotify, YouTube, etc.)" />
+          </div>
+        ) : (
+          <Btn variant="ghost" small onClick={() => { setShowNewPl(true); setSelPl(""); }}>+ New playlist name</Btn>
+        )}
       </Card>
 
       <Card style={{ marginBottom:20 }}>
@@ -460,7 +516,7 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
       album:  (!entry.album.enabled||skipped) ? null : catResult("album"),
     };
     if (game.playlist && !playlists.find(p=>p.name===game.playlist)) {
-      onSavePlaylists([...playlists, { id:uid(), name:game.playlist }]);
+      onSavePlaylists([...playlists, { id:uid(), name:game.playlist, url:game.playlistUrl||null }]);
     }
     onUpdateGame({ ...game, elapsedSeconds:elapsed, songs:[...(game.songs||[]), song] });
     setEntry(initEntry(game.players, albumOn));
@@ -738,6 +794,7 @@ function SummaryScreen({ game, onHome }) {
         <div style={{ color:T.muted, fontSize:13, marginTop:4 }}>
           {songs.length} songs · {fmtTime(game.elapsedSeconds||0)}{game.playlist && ` · ${game.playlist}`}
         </div>
+        {game.playlistUrl && <div style={{ marginTop:6 }}><PlaylistLink url={game.playlistUrl} /></div>}
       </div>
 
       <Card style={{ marginBottom:14 }}>
@@ -777,7 +834,7 @@ function SummaryScreen({ game, onHome }) {
 }
 
 // ─── Scoreboard ───────────────────────────────────────────────────────────────
-function ScoreboardScreen({ games, onBack }) {
+function ScoreboardScreen({ games, playlists, onBack }) {
   const [tab, setTab]           = useState("rankings");
   const [sortBy, setSortBy]     = useState("points");
   const [sortDir, setSortDir]   = useState("desc");
@@ -790,7 +847,7 @@ function ScoreboardScreen({ games, onBack }) {
   const allPl = [...new Set(games.filter(g=>g.playlist).map(g=>g.playlist))];
   const filtered = games.filter(g => (fMode==="all"||g.mode===fMode) && (fPl==="all"||g.playlist===fPl));
   const playerMap   = buildPlayerMap(filtered);
-  const playlistMap = buildPlaylistMap(games);
+  const playlistMap = buildPlaylistMap(games, playlists);
 
   const sorted = [...Object.values(playerMap)].sort((a,b) => {
     let va, vb;
@@ -925,6 +982,7 @@ function PlaylistTab({ playlistMap, detailPl, setDetailPl }) {
               <div style={{ color:T.muted, fontSize:11, marginTop:2 }}>
                 {pl.totalGames} game{pl.totalGames!==1?"s":""} · {pl.totalSongs} songs · {Math.round(pl.totalMinutes)}m
               </div>
+              {pl.url && <div style={{ marginTop:4 }}><PlaylistLink url={pl.url} /></div>}
               <div style={{ display:"flex", gap:6, marginTop:5, flexWrap:"wrap" }}>
                 {[["🎵","title"],["🎤","artist"],["💿","album"]].map(([icon,cat]) => {
                   const [c,p] = pl.cats[cat];
@@ -948,6 +1006,7 @@ function PlaylistDetail({ pl, expPlayer, setExpPlayer }) {
   const players = [...Object.values(pl.playerMap)].sort((a,b)=>b.correct-a.correct);
   return (
     <div>
+      {pl.url && <div style={{ marginBottom:14 }}><PlaylistLink url={pl.url} /></div>}
       <div style={{ marginBottom:14 }}>
         {[["Games",pl.totalGames],["Songs",pl.totalSongs],["Time",`${Math.round(pl.totalMinutes)}m`]].map(([l,v]) => (
           <div key={l} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
@@ -1079,6 +1138,7 @@ function HistoryScreen({ games, onUpdateGames, onBack }) {
                   {new Date(g.startedAt).toLocaleDateString()} · {fmtTime(g.elapsedSeconds||0)} · {(g.songs||[]).filter(s=>!s.skipped).length} songs
                   {g.playlist && ` · ${g.playlist}`}
                 </div>
+                {g.playlistUrl && <div style={{ marginTop:4 }}><PlaylistLink url={g.playlistUrl} /></div>}
                 <div style={{ display:"flex", gap:8, marginTop:6, flexWrap:"wrap" }}>
                   {computeScores(g.players, g.songs||[], g.mode).map(s => (
                     <span key={s.name} style={{ fontSize:12, color:T.accent, fontWeight:700 }}>{s.name}: {s.correct}</span>
@@ -1102,7 +1162,10 @@ function GameEditForm({ game, onChange, onSave, onCancel }) {
   return (
     <div>
       <Lbl>Playlist</Lbl>
-      <TInput value={game.playlist||""} onChange={v=>onChange({...game,playlist:v})} placeholder="Playlist name" style={{ marginBottom:14 }} />
+      <TInput value={game.playlist||""} onChange={v=>onChange({...game,playlist:v})} placeholder="Playlist name" style={{ marginBottom:10 }} />
+      <Lbl>Playlist URL (optional)</Lbl>
+      <TInput value={game.playlistUrl||""} onChange={v=>onChange({...game,playlistUrl:v||null})} placeholder="Spotify, YouTube, Apple Music, etc." style={{ marginBottom:14 }} />
+      {game.playlistUrl && <div style={{ marginBottom:14 }}><PlaylistLink url={game.playlistUrl} /></div>}
       <Lbl>Player Names</Lbl>
       {game.players.map((p,i) => (
         <div key={p.id} style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
@@ -1137,40 +1200,80 @@ function GameEditForm({ game, onChange, onSave, onCancel }) {
 
 // ─── Playlists Manager ────────────────────────────────────────────────────────
 function PlaylistScreen({ playlists, onUpdate, onBack }) {
-  const [name, setName] = useState("");
+  const [name, setName]       = useState("");
+  const [url, setUrl]         = useState("");
+  const [editPl, setEditPl]   = useState(null); // {id, name, url}
+
   function add() {
     if (!name.trim() || playlists.find(p=>p.name===name.trim())) return;
-    onUpdate([...playlists, { id:uid(), name:name.trim() }]);
-    setName("");
+    onUpdate([...playlists, { id:uid(), name:name.trim(), url:url.trim()||null }]);
+    setName(""); setUrl("");
   }
+
+  function saveEdit() {
+    if (!editPl) return;
+    onUpdate(playlists.map(p => p.id===editPl.id ? { ...p, name:editPl.name.trim(), url:editPl.url?.trim()||null } : p));
+    setEditPl(null);
+  }
+
   return (
-    <div style={{ padding:16, maxWidth:460, margin:"0 auto" }}>
+    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
         <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
         <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Playlists</h2>
       </div>
-      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
-        <TInput value={name} onChange={setName} placeholder="New playlist name" />
-        <Btn onClick={add} disabled={!name.trim()}>Add</Btn>
-      </div>
+
+      {/* Add new */}
+      <Card style={{ marginBottom:14 }}>
+        <Lbl>Add Playlist</Lbl>
+        <TInput value={name} onChange={setName} placeholder="Playlist name" style={{ marginBottom:8 }} />
+        <TInput value={url} onChange={setUrl} placeholder="URL (optional — Spotify, YouTube, etc.)" style={{ marginBottom:10 }} />
+        <Btn onClick={add} disabled={!name.trim()} style={{ width:"100%" }}>Add Playlist</Btn>
+      </Card>
+
       {playlists.length===0
         ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No playlists saved yet</div>
         : playlists.map(pl => (
-          <Card key={pl.id} style={{ marginBottom:8, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ color:T.text, fontWeight:600 }}>🎵 {pl.name}</span>
-            <Btn variant="danger" small onClick={() => onUpdate(playlists.filter(p=>p.id!==pl.id))}>Remove</Btn>
+          <Card key={pl.id} style={{ marginBottom:8 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:10 }}>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color:T.text, fontWeight:600, fontSize:14 }}>🎵 {pl.name}</div>
+                {pl.url && <div style={{ marginTop:4 }}><PlaylistLink url={pl.url} /></div>}
+              </div>
+              <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                <Btn variant="ghost" small onClick={() => setEditPl({...pl, url:pl.url||""})}>Edit</Btn>
+                <Btn variant="danger" small onClick={() => onUpdate(playlists.filter(p=>p.id!==pl.id))}>Remove</Btn>
+              </div>
+            </div>
           </Card>
         ))
       }
+
+      <Modal open={!!editPl} onClose={() => setEditPl(null)} title="Edit Playlist">
+        {editPl && (
+          <div>
+            <Lbl>Name</Lbl>
+            <TInput value={editPl.name} onChange={v=>setEditPl({...editPl,name:v})} placeholder="Playlist name" style={{ marginBottom:12 }} />
+            <Lbl>URL (optional)</Lbl>
+            <TInput value={editPl.url||""} onChange={v=>setEditPl({...editPl,url:v})} placeholder="Spotify, YouTube, Apple Music, etc." style={{ marginBottom:16 }} />
+            {editPl.url && <div style={{ marginBottom:14 }}><PlaylistLink url={editPl.url} /></div>}
+            <div style={{ display:"flex", gap:10 }}>
+              <Btn variant="ghost" onClick={() => setEditPl(null)} style={{ flex:1 }}>Cancel</Btn>
+              <Btn variant="primary" onClick={saveEdit} disabled={!editPl.name.trim()} style={{ flex:1 }}>Save</Btn>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
 
-// ─── Data Screen (export / import) ───────────────────────────────────────────
+// ─── Data Screen (export / import / share) ───────────────────────────────────
 function DataScreen({ games, playlists, onImport, onBack }) {
   const [importText, setImportText] = useState("");
   const [importMode, setImportMode] = useState("merge"); // merge | replace
   const [status, setStatus]         = useState(null);   // { ok, msg }
+  const [tab, setTab]               = useState("backup"); // backup | share
   const fileRef = useRef(null);
 
   // ── Export ──────────────────────────────────────────────────────────────────
@@ -1221,7 +1324,6 @@ function DataScreen({ games, playlists, onImport, onBack }) {
       newGames     = parsed.games;
       newPlaylists = parsed.playlists;
     } else {
-      // Merge: keep existing, add anything from import whose id doesn't already exist
       const existingGameIds = new Set(games.map(g=>g.id));
       const existingPlIds   = new Set(playlists.map(p=>p.id));
       const addedGames = parsed.games.filter(g => !existingGameIds.has(g.id));
@@ -1240,10 +1342,14 @@ function DataScreen({ games, playlists, onImport, onBack }) {
 
   return (
     <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
         <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
         <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Data & Backup</h2>
       </div>
+
+      <Tabs tabs={[{label:"💾 Backup",value:"backup"},{label:"🔗 Share Data",value:"share"}]}
+        active={tab} onChange={setTab} />
+      <div style={{ marginBottom:14 }} />
 
       {/* Status banner */}
       {status && (
@@ -1258,78 +1364,210 @@ function DataScreen({ games, playlists, onImport, onBack }) {
         </div>
       )}
 
-      {/* Export */}
+      {tab === "backup" && <>
+        {/* Export */}
+        <Card style={{ marginBottom:14 }}>
+          <Lbl>Export</Lbl>
+          <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
+            Downloads a <code style={{ color:T.accent, fontSize:12 }}>.json</code> backup file containing all your games and playlists. Keep this somewhere safe.
+          </p>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+            background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:8 }}>
+            <span style={{ color:T.muted, fontSize:13 }}>Games saved</span>
+            <span style={{ color:T.text, fontWeight:700 }}>{games.length}</span>
+          </div>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+            background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
+            <span style={{ color:T.muted, fontSize:13 }}>Playlists saved</span>
+            <span style={{ color:T.text, fontWeight:700 }}>{playlists.length}</span>
+          </div>
+          <Btn onClick={doExport} style={{ width:"100%" }}>⬇ Download Backup</Btn>
+        </Card>
+
+        {/* Import */}
+        <Card>
+          <Lbl>Import</Lbl>
+          <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
+            Load a previously exported backup file. Choose whether to merge with existing data or replace it entirely.
+          </p>
+          <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+            {[["merge","Merge"],["replace","Replace all"]].map(([v,l]) => (
+              <button key={v} onClick={() => setImportMode(v)}
+                style={{ flex:1, padding:"8px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
+                  border:`1px solid ${importMode===v ? T.accent : T.border}`,
+                  background: importMode===v ? `${T.accent}22` : T.surface,
+                  color: importMode===v ? T.accent : T.muted }}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <p style={{ color:T.muted, fontSize:12, marginBottom:14, lineHeight:1.4 }}>
+            {importMode==="merge"
+              ? "Adds new games and playlists from the file. Anything already in your data (matched by ID) is left untouched."
+              : "⚠️ Overwrites all current data with the file contents. Your existing games and playlists will be lost."}
+          </p>
+          <input ref={fileRef} type="file" accept=".json,application/json" onChange={onFileChange}
+            style={{ display:"none" }} />
+          <Btn variant="secondary" onClick={() => fileRef.current.click()} style={{ width:"100%", marginBottom:10 }}>
+            📂 Choose File…
+          </Btn>
+          {importText ? (
+            <div style={{ background:T.surface, borderRadius:8, padding:"10px 12px", marginBottom:10,
+              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span style={{ color:T.green, fontSize:13 }}>✓ File loaded ({(importText.length/1024).toFixed(1)} KB)</span>
+              <button onClick={() => setImportText("")} style={{ background:"none", color:T.muted, fontSize:14 }}>✕</button>
+            </div>
+          ) : (
+            <details style={{ marginBottom:10 }}>
+              <summary style={{ color:T.muted, fontSize:12, cursor:"pointer", userSelect:"none" }}>Or paste JSON manually</summary>
+              <textarea value={importText} onChange={e=>setImportText(e.target.value)}
+                placeholder='{"version":1,"games":[...],"playlists":[]}'
+                style={{ width:"100%", marginTop:8, background:T.surface, border:`1px solid ${T.border}`,
+                  borderRadius:8, padding:"10px 12px", color:T.text, fontSize:12,
+                  resize:"vertical", minHeight:80, outline:"none", fontFamily:"monospace" }} />
+            </details>
+          )}
+          <Btn onClick={doImport} disabled={!importText.trim()} variant={importMode==="replace" ? "danger" : "primary"}
+            style={{ width:"100%" }}>
+            {importMode==="replace" ? "⚠️ Replace & Import" : "⬆ Merge & Import"}
+          </Btn>
+        </Card>
+      </>}
+
+      {tab === "share" && (
+        <FirebaseSharePanel games={games} playlists={playlists} onImport={onImport} onStatus={setStatus} />
+      )}
+    </div>
+  );
+}
+
+// ─── Firebase Share Panel ─────────────────────────────────────────────────────
+function FirebaseSharePanel({ games, playlists, onImport, onStatus }) {
+  const [shareCode, setShareCode]   = useState(null);
+  const [importCode, setImportCode] = useState("");
+  const [loading, setLoading]       = useState(false);
+  const fbConfigOk = FB.dbUrl && !FB.dbUrl.includes("YOUR-PROJECT");
+
+  function genCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+  }
+
+  async function doShare() {
+    if (!fbConfigOk) { onStatus({ ok:false, msg:"Firebase not configured yet — see setup instructions below." }); return; }
+    setLoading(true); setShareCode(null);
+    const code = genCode();
+    const payload = {
+      version: 1,
+      sharedAt: Date.now(),
+      expiresAt: Date.now() + 48 * 60 * 60 * 1000,
+      games,
+      playlists,
+    };
+    try {
+      const res = await fetch(`${FB.dbUrl}/shares/${code}.json`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`Firebase error ${res.status} — check your DB rules allow writes to /shares`);
+      setShareCode(code);
+      onStatus({ ok:true, msg:`Data shared! Code: ${code} (expires in 48 hours)` });
+    } catch (err) {
+      onStatus({ ok:false, msg:`Share failed: ${err.message}` });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function doImportCode() {
+    const code = importCode.trim().toUpperCase();
+    if (code.length !== 6) { onStatus({ ok:false, msg:"Enter a 6-character share code." }); return; }
+    if (!fbConfigOk) { onStatus({ ok:false, msg:"Firebase not configured yet — see setup instructions below." }); return; }
+    setLoading(true);
+    try {
+      const res = await fetch(`${FB.dbUrl}/shares/${code}.json`);
+      if (!res.ok) throw new Error(`Firebase error ${res.status}`);
+      const data = await res.json();
+      if (!data) { onStatus({ ok:false, msg:"Code not found. It may have expired or been mistyped." }); setLoading(false); return; }
+      if (data.expiresAt && Date.now() > data.expiresAt) {
+        onStatus({ ok:false, msg:"This share code has expired (48-hour limit)." }); setLoading(false); return;
+      }
+      if (!Array.isArray(data.games) || !Array.isArray(data.playlists)) {
+        onStatus({ ok:false, msg:"Share data looks corrupted. Ask the sender to try again." }); setLoading(false); return;
+      }
+      const existingGameIds = new Set(games.map(g=>g.id));
+      const existingPlIds   = new Set(playlists.map(p=>p.id));
+      const addedGames = data.games.filter(g => !existingGameIds.has(g.id));
+      const addedPl    = data.playlists.filter(p => !existingPlIds.has(p.id));
+      onImport([...games, ...addedGames], [...playlists, ...addedPl]);
+      setImportCode("");
+      onStatus({ ok:true, msg:`Merged ${addedGames.length} new game${addedGames.length!==1?"s":""} and ${addedPl.length} new playlist${addedPl.length!==1?"s":""} from code ${code}.` });
+    } catch (err) {
+      onStatus({ ok:false, msg:`Import failed: ${err.message}` });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div>
+      {!fbConfigOk && (
+        <Card style={{ marginBottom:14, borderColor:"#92400E", background:"#1c1409" }}>
+          <div style={{ color:T.accent, fontWeight:700, fontSize:14, marginBottom:8 }}>⚙️ Firebase Setup Required</div>
+          <p style={{ color:T.muted, fontSize:13, lineHeight:1.6, marginBottom:10 }}>
+            Sharing uses a free Firebase Realtime Database. One-time setup:
+          </p>
+          <div style={{ color:T.muted, fontSize:13, lineHeight:2 }}>
+            1. Go to <a href="https://console.firebase.google.com" target="_blank" rel="noopener noreferrer" style={{ color:T.blue }}>console.firebase.google.com</a><br/>
+            2. Create a project → Build → Realtime Database → Create database (test mode)<br/>
+            3. Copy your database URL (e.g. <code style={{ color:T.accent, fontSize:12 }}>https://my-app-default-rtdb.firebaseio.com</code>)<br/>
+            4. Open this HTML file and replace <code style={{ color:T.accent, fontSize:12 }}>YOUR-PROJECT-ID</code> in the <code style={{ color:T.accent, fontSize:12 }}>FB.dbUrl</code> near the top of the script<br/>
+            5. In Firebase Console → Realtime Database → Rules, set <code style={{ color:T.accent, fontSize:12 }}>/shares</code> to allow read/write
+          </div>
+        </Card>
+      )}
+
       <Card style={{ marginBottom:14 }}>
-        <Lbl>Export</Lbl>
+        <Lbl>Share your data</Lbl>
         <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Downloads a <code style={{ color:T.accent, fontSize:12 }}>.json</code> backup file containing all your games and playlists. Keep this somewhere safe.
+          Uploads your game history to Firebase and generates a 6-character code. Give the code to another player — they enter it below to merge your data into their app. Expires after 48 hours.
         </p>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
           background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
-          <span style={{ color:T.muted, fontSize:13 }}>Games saved</span>
+          <span style={{ color:T.muted, fontSize:13 }}>Games to share</span>
           <span style={{ color:T.text, fontWeight:700 }}>{games.length}</span>
         </div>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-          background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
-          <span style={{ color:T.muted, fontSize:13 }}>Playlists saved</span>
-          <span style={{ color:T.text, fontWeight:700 }}>{playlists.length}</span>
-        </div>
-        <Btn onClick={doExport} style={{ width:"100%" }}>⬇ Download Backup</Btn>
+        {shareCode && (
+          <div style={{ background:"#0d1f2d", border:`2px solid ${T.blue}`, borderRadius:12,
+            padding:"16px", marginBottom:14, textAlign:"center" }}>
+            <div style={{ color:T.muted, fontSize:12, marginBottom:6 }}>Share code (valid 48h)</div>
+            <div style={{ color:T.blue, fontSize:36, fontWeight:900, letterSpacing:"0.18em", fontFamily:"monospace" }}>
+              {shareCode}
+            </div>
+            <div style={{ color:T.muted, fontSize:12, marginTop:6 }}>Tell the other player to enter this code</div>
+          </div>
+        )}
+        <Btn onClick={doShare} disabled={loading || !games.length} style={{ width:"100%" }}>
+          {loading ? "Uploading…" : shareCode ? "📤 Share Again (New Code)" : "📤 Share Data"}
+        </Btn>
       </Card>
 
-      {/* Import */}
       <Card>
-        <Lbl>Import</Lbl>
+        <Lbl>Import from code</Lbl>
         <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Load a previously exported backup file. Choose whether to merge with existing data or replace it entirely.
+          Enter a 6-character code from another player to merge their history into your app. Your existing data is kept — only new entries are added.
         </p>
-
-        {/* Import mode toggle */}
-        <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-          {[["merge","Merge"],["replace","Replace all"]].map(([v,l]) => (
-            <button key={v} onClick={() => setImportMode(v)}
-              style={{ flex:1, padding:"8px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
-                border:`1px solid ${importMode===v ? T.accent : T.border}`,
-                background: importMode===v ? `${T.accent}22` : T.surface,
-                color: importMode===v ? T.accent : T.muted }}>
-              {l}
-            </button>
-          ))}
-        </div>
-        <p style={{ color:T.muted, fontSize:12, marginBottom:14, lineHeight:1.4 }}>
-          {importMode==="merge"
-            ? "Adds new games and playlists from the file. Anything already in your data (matched by ID) is left untouched."
-            : "⚠️ Overwrites all current data with the file contents. Your existing games and playlists will be lost."}
-        </p>
-
-        {/* File picker */}
-        <input ref={fileRef} type="file" accept=".json,application/json" onChange={onFileChange}
-          style={{ display:"none" }} />
-        <Btn variant="secondary" onClick={() => fileRef.current.click()} style={{ width:"100%", marginBottom:10 }}>
-          📂 Choose File…
-        </Btn>
-
-        {/* Paste fallback */}
-        {importText ? (
-          <div style={{ background:T.surface, borderRadius:8, padding:"10px 12px", marginBottom:10,
-            display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-            <span style={{ color:T.green, fontSize:13 }}>✓ File loaded ({(importText.length/1024).toFixed(1)} KB)</span>
-            <button onClick={() => setImportText("")} style={{ background:"none", color:T.muted, fontSize:14 }}>✕</button>
-          </div>
-        ) : (
-          <details style={{ marginBottom:10 }}>
-            <summary style={{ color:T.muted, fontSize:12, cursor:"pointer", userSelect:"none" }}>Or paste JSON manually</summary>
-            <textarea value={importText} onChange={e=>setImportText(e.target.value)}
-              placeholder='{"version":1,"games":[...],"playlists":[...]}'
-              style={{ width:"100%", marginTop:8, background:T.surface, border:`1px solid ${T.border}`,
-                borderRadius:8, padding:"10px 12px", color:T.text, fontSize:12,
-                resize:"vertical", minHeight:80, outline:"none", fontFamily:"monospace" }} />
-          </details>
-        )}
-
-        <Btn onClick={doImport} disabled={!importText.trim()} variant={importMode==="replace" ? "danger" : "primary"}
-          style={{ width:"100%" }}>
-          {importMode==="replace" ? "⚠️ Replace & Import" : "⬆ Merge & Import"}
+        <TInput
+          value={importCode}
+          onChange={v => setImportCode(v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6))}
+          placeholder="Enter code (e.g. AB3X7K)"
+          style={{ marginBottom:12, fontSize:18, fontFamily:"monospace", textAlign:"center", letterSpacing:"0.15em" }}
+        />
+        <Btn onClick={doImportCode} disabled={loading || importCode.trim().length !== 6} style={{ width:"100%" }}>
+          {loading ? "Importing…" : "⬆ Import from Code"}
         </Btn>
       </Card>
     </div>
@@ -1355,7 +1593,7 @@ function App() {
     const game = {
       id:uid(), startedAt:Date.now(), status:"active",
       mode:config.mode, players:config.players, albumEnabled:config.albumEnabled,
-      playlist:config.playlist, songs:[], elapsedSeconds:0,
+      playlist:config.playlist, playlistUrl:config.playlistUrl||null, songs:[], elapsedSeconds:0,
     };
     setCurrentGame(game);
     setScreen("game");
@@ -1379,7 +1617,7 @@ function App() {
     const g = games.find(g=>g.id===summaryId);
     if (g) return <SummaryScreen game={g} onHome={() => setScreen("home")} />;
   }
-  if (screen==="scoreboard")  return <ScoreboardScreen games={games} onBack={() => setScreen("home")} />;
+  if (screen==="scoreboard")  return <ScoreboardScreen games={games} playlists={playlists} onBack={() => setScreen("home")} />;
   if (screen==="history")     return <HistoryScreen games={games} onUpdateGames={updateGames} onBack={() => setScreen("home")} />;
   if (screen==="playlists")   return <PlaylistScreen playlists={playlists} onUpdate={updatePl} onBack={() => setScreen("home")} />;
   if (screen==="data")        return <DataScreen games={games} playlists={playlists} onImport={importData} onBack={() => setScreen("home")} />;
