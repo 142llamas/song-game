@@ -96,8 +96,12 @@ const db = {
     // Firebase rejects objects with null values — strip url if not set
     const data = { id:pl.id, name:pl.name };
     if (pl.url) data.url = pl.url;
+    // Use the playlist's id as the key so edits overwrite correctly,
+    // but new playlists get their id from Firebase push() — see PlaylistScreen
     return fbDb.ref(`playlists/${pl.id}`).set(data);
   },
+  // Generate a guaranteed-unique playlist ID via Firebase push()
+  newPlaylistId: () => fbDb.ref('playlists').push().key,
   deletePlaylist: (id) => fbDb.ref(`playlists/${id}`).remove(),
 
   // Shares
@@ -1294,15 +1298,24 @@ function PlaylistScreen({ playlists, onBack }) {
   async function add() {
     if (!name.trim() || playlists.find(p=>p.name===name.trim())) return;
     setSaving(true);
-    await db.savePlaylist({ id:uid(), name:name.trim(), url:url.trim()||null });
-    setName(""); setUrl(""); setSaving(false);
+    try {
+      const id = db.newPlaylistId();
+      await db.savePlaylist({ id, name:name.trim(), url:url.trim()||null });
+      setName(""); setUrl("");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function saveEdit() {
     if (!editPl) return;
     setSaving(true);
-    await db.savePlaylist({ ...editPl, name:editPl.name.trim(), url:editPl.url?.trim()||null });
-    setEditPl(null); setSaving(false);
+    try {
+      await db.savePlaylist({ ...editPl, name:editPl.name.trim(), url:editPl.url?.trim()||null });
+      setEditPl(null);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function remove(id) {
