@@ -440,8 +440,8 @@ function HomeScreen({ onNav, myGames, user }) {
         🎵 New Game
       </Btn>
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:24 }}>
-        {[["📊","Scoreboard","scoreboard"],["📜","My History","history"],["💽","Playlists","playlists"],["🔗","Share Data","share"]].map(([icon,label,s])=>(
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:24 }}>
+        {[["📊","Scoreboard","scoreboard"],["📜","My History","history"],["💽","Playlists","playlists"]].map(([icon,label,s])=>(
           <button key={s} onClick={() => onNav(s)}
             style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:12,
               padding:"14px 8px", color:T.text, fontSize:12, fontWeight:600,
@@ -1349,131 +1349,6 @@ function PlaylistScreen({ playlists, onBack }) {
   );
 }
 
-// ─── Share Data Screen ────────────────────────────────────────────────────────
-function ShareScreen({ myGames, playlists, onBack }) {
-  const [shareCode, setShareCode]   = useState(null);
-  const [importCode, setImportCode] = useState("");
-  const [loading, setLoading]       = useState(false);
-  const [status, setStatus]         = useState(null);
-
-  function genCode() {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "";
-    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-    return code;
-  }
-
-  async function doShare() {
-    setLoading(true); setShareCode(null); setStatus(null);
-    const code = genCode();
-    try {
-      await db.saveShare(code, {
-        version: 1,
-        sharedAt: Date.now(),
-        expiresAt: Date.now() + 48 * 60 * 60 * 1000,
-        games: myGames,
-        playlists,
-      });
-      setShareCode(code);
-      setStatus({ ok:true, msg:`Code expires in 48 hours.` });
-    } catch (e) {
-      setStatus({ ok:false, msg:`Share failed: ${e.message}` });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function doImport() {
-    const code = importCode.trim().toUpperCase();
-    if (code.length !== 6) { setStatus({ ok:false, msg:"Enter a 6-character code." }); return; }
-    setLoading(true); setStatus(null);
-    try {
-      const data = await db.getShare(code);
-      if (!data) { setStatus({ ok:false, msg:"Code not found — it may have expired or been mistyped." }); setLoading(false); return; }
-      if (data.expiresAt && Date.now() > data.expiresAt) { setStatus({ ok:false, msg:"This code has expired." }); setLoading(false); return; }
-      if (!Array.isArray(data.games)) { setStatus({ ok:false, msg:"Share data looks corrupted." }); setLoading(false); return; }
-
-      // Merge games into Firebase (each under its own ID — won't overwrite existing)
-      const existingIds = new Set(myGames.map(g=>g.id));
-      const newGames = (data.games||[]).filter(g => !existingIds.has(g.id));
-      await Promise.all(newGames.map(g => db.saveGame(g)));
-
-      // Merge playlists
-      const existingPlIds = new Set(playlists.map(p=>p.id));
-      const newPls = (data.playlists||[]).filter(p => !existingPlIds.has(p.id));
-      await Promise.all(newPls.map(p => db.savePlaylist(p)));
-
-      setImportCode("");
-      setStatus({ ok:true, msg:`Merged ${newGames.length} new game${newGames.length!==1?"s":""} and ${newPls.length} new playlist${newPls.length!==1?"s":""}.` });
-    } catch (e) {
-      setStatus({ ok:false, msg:`Import failed: ${e.message}` });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
-        <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
-        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Share Data</h2>
-      </div>
-
-      {status && (
-        <div style={{ background: status.ok ? "#14532D" : "#7F1D1D",
-          border: `1px solid ${status.ok ? "#166534" : "#991B1B"}`,
-          borderRadius:10, padding:"12px 14px", marginBottom:16,
-          display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
-          <span style={{ color: status.ok ? T.green : "#FCA5A5", fontSize:14 }}>
-            {status.ok ? "✓ " : "✗ "}{status.msg}
-          </span>
-          <button onClick={() => setStatus(null)} style={{ background:"none", color:T.muted, fontSize:16, flexShrink:0 }}>✕</button>
-        </div>
-      )}
-
-      <Card style={{ marginBottom:14 }}>
-        <Lbl>Share your data</Lbl>
-        <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Generates a 6-character code. Give it to another player so they can merge your game history into their app. Expires after 48 hours.
-        </p>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-          background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
-          <span style={{ color:T.muted, fontSize:13 }}>Your games</span>
-          <span style={{ color:T.text, fontWeight:700 }}>{myGames.length}</span>
-        </div>
-        {shareCode && (
-          <div style={{ background:"#0d1f2d", border:`2px solid ${T.blue}`, borderRadius:12,
-            padding:"16px", marginBottom:14, textAlign:"center" }}>
-            <div style={{ color:T.muted, fontSize:12, marginBottom:6 }}>Share code (valid 48h)</div>
-            <div style={{ color:T.blue, fontSize:36, fontWeight:900, letterSpacing:"0.18em", fontFamily:"monospace" }}>
-              {shareCode}
-            </div>
-          </div>
-        )}
-        <Btn onClick={doShare} disabled={loading || !myGames.length} style={{ width:"100%" }}>
-          {loading ? "Uploading…" : shareCode ? "📤 Share Again (New Code)" : "📤 Generate Share Code"}
-        </Btn>
-      </Card>
-
-      <Card>
-        <Lbl>Import from code</Lbl>
-        <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Enter a code from another player to merge their history into your app.
-        </p>
-        <TInput
-          value={importCode}
-          onChange={v => setImportCode(v.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,6))}
-          placeholder="Enter code (e.g. AB3X7K)"
-          style={{ marginBottom:12, fontSize:18, fontFamily:"monospace", textAlign:"center", letterSpacing:"0.15em" }}
-        />
-        <Btn onClick={doImport} disabled={loading || importCode.trim().length !== 6} style={{ width:"100%" }}>
-          {loading ? "Importing…" : "⬆ Import from Code"}
-        </Btn>
-      </Card>
-    </div>
-  );
-}
-
 // ─── Top Bar ─────────────────────────────────────────────────────────────────
 function TopBar({ user, onOpenAccount }) {
   return (
@@ -1632,7 +1507,6 @@ function App() {
           setMyGames(prev => prev.map(x=>x.id===g.id?g:x));
         }} onBack={() => setScreen("home")} />}
       {screen==="playlists"  && <PlaylistScreen playlists={playlists} onBack={() => setScreen("home")} />}
-      {screen==="share"      && <ShareScreen myGames={myGames} playlists={playlists} onBack={() => setScreen("home")} />}
     </div>
   );
 }
