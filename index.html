@@ -64,8 +64,8 @@ const db = {
   listenMyGames: (uid, cb) => {
     const ref = fbDb.ref('games').orderByChild('ownerUid').equalTo(uid);
     ref.on('value', snap => {
-      const games = [];
-      snap.forEach(child => games.push(child.val()));
+      const val = snap.val();
+      const games = val ? Object.values(val) : [];
       cb(games.sort((a,b) => (b.startedAt||0) - (a.startedAt||0)));
     });
     return () => ref.off();
@@ -75,9 +75,8 @@ const db = {
   listenAllGames: (cb) => {
     const ref = fbDb.ref('games');
     ref.on('value', snap => {
-      const games = [];
-      snap.forEach(child => games.push(child.val()));
-      cb(games);
+      const val = snap.val();
+      cb(val ? Object.values(val) : []);
     });
     return () => ref.off();
   },
@@ -86,9 +85,8 @@ const db = {
   listenPlaylists: (cb) => {
     const ref = fbDb.ref('playlists');
     ref.on('value', snap => {
-      const pls = [];
-      snap.forEach(child => pls.push(child.val()));
-      cb(pls);
+      const val = snap.val();
+      cb(val ? Object.values(val) : []);
     });
     return () => ref.off();
   },
