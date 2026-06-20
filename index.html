@@ -333,18 +333,35 @@ function buildPlayerMap(filteredGames) {
 
   filteredGames.forEach(g => {
     const songs = (g.songs||[]).filter(s=>!s.skipped);
-    computeScores(g.players, g.songs||[], g.mode).forEach(s => {
-      // Find the full player object to check for accountUid
+    const gameMinutes = (g.elapsedSeconds||0) / 60;
+    const scoresByPlayer = computeScores(g.players, g.songs||[], g.mode);
+
+    scoresByPlayer.forEach(s => {
       const playerObj = g.players.find(p=>p.id===s.id);
       const key = playerObj ? playerKey(playerObj) : s.name;
-      if (!pm[key]) pm[key] = { name:s.name, accountUid: playerObj?.accountUid||null, correct:0, incorrect:0, songsPlayed:0, minutesPlayed:0, title:[0,0], artist:[0,0], album:[0,0] };
-      // Always use the most recent display name for linked accounts
+      if (!pm[key]) pm[key] = {
+        name: s.name,
+        accountUid: playerObj?.accountUid||null,
+        correct: 0, incorrect: 0,
+        songsPlayed: 0, minutesPlayed: 0,
+        title:[0,0], artist:[0,0], album:[0,0],
+        games: [], // per-game records for best/avg
+      };
       pm[key].name = s.name;
       pm[key].correct += s.correct;
       pm[key].incorrect += s.incorrect;
       pm[key].songsPlayed += songs.length;
-      pm[key].minutesPlayed += (g.elapsedSeconds||0)/60;
+      pm[key].minutesPlayed += gameMinutes;
+      pm[key].games.push({
+        correct: s.correct,
+        incorrect: s.incorrect,
+        minutes: gameMinutes,
+        songs: songs.length,
+        ppm: gameMinutes > 0 ? s.correct / gameMinutes : 0,
+        ratio: s.incorrect > 0 ? s.correct / s.incorrect : s.correct > 0 ? Infinity : 0,
+      });
     });
+
     songs.forEach(song => {
       ["title","artist","album"].forEach(cat => {
         const r = song[cat];
@@ -361,6 +378,21 @@ function buildPlayerMap(filteredGames) {
       });
     });
   });
+
+  // Compute derived stats for each player
+  Object.values(pm).forEach(p => {
+    const qualifiedGames = p.games.filter(g => g.minutes >= 10);
+    p.bestGame = qualifiedGames.length > 0
+      ? qualifiedGames.reduce((best, g) => g.correct > best.correct ? g : best)
+      : null;
+    const gc = p.games.length;
+    p.avgCorrect   = gc > 0 ? p.correct / gc : 0;
+    p.avgIncorrect = gc > 0 ? p.incorrect / gc : 0;
+    p.avgPpm       = gc > 0 ? p.games.reduce((a,g)=>a+g.ppm,0) / gc : 0;
+    p.avgRatio     = gc > 0 ? p.games.filter(g=>isFinite(g.ratio)).reduce((a,g,_,arr)=>a+g.ratio/arr.length,0) : 0;
+    p.gameCount    = gc;
+  });
+
   return pm;
 }
 
@@ -725,6 +757,7 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
   const [entry, setEntry]       = useState(() => initEntry(game.players, game.albumEnabled));
   const [showEnd, setShowEnd]   = useState(false);
   const [showScores, setShowScores] = useState(false);
+  const [prevSnapshot, setPrevSnapshot] = useState(null); // { game, entry, timerSecs } for undo
 
   useEffect(() => { timer.start(); }, []);
 
@@ -773,6 +806,8 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
   async function submitSong(skipped=false) {
     const elapsed = timer.secs;
     timer.pause();
+    // Save snapshot for undo before committing
+    setPrevSnapshot({ game: { ...game }, entry: { ...entry }, timerSecs: elapsed });
     const song = {
       id:uid(), timestamp:Date.now(), skipped,
       album_enabled: entry.album.enabled,
@@ -792,6 +827,21 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
     timer.start();
   }
 
+  async function undoPrevSong() {
+    if (!prevSnapshot) return;
+    timer.pause();
+    // Restore the game state to before the last song was submitted
+    const restored = {
+      ...prevSnapshot.game,
+      elapsedSeconds: prevSnapshot.timerSecs,
+    };
+    onUpdateGame(restored);
+    await db.saveGame(restored);
+    setEntry(prevSnapshot.entry);
+    setPrevSnapshot(null);
+    timer.start();
+  }
+
   const [countdown, setCountdown] = useState(null);
 
   function handleGotAll() {
@@ -806,6 +856,7 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
       });
       return next;
     });
+    setPrevSnapshot(null); // can't undo once countdown starts
     setCountdown(3);
   }
 
@@ -874,17 +925,33 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
                 <Btn variant="success" onClick={handleGotAll} style={{ flex:1 }}>⚡ Got All →3s</Btn>
                 <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:1 }}>Next Song →</Btn>
               </div>
-              <Btn variant="ghost" onClick={() => submitSong(true)}
-                style={{ width:"100%", fontSize:12, padding:"8px", opacity:0.6 }}>
-                Skip song (no points recorded)
-              </Btn>
+              <div style={{ display:"flex", gap:10 }}>
+                <Btn variant="ghost" onClick={() => submitSong(true)}
+                  style={{ flex:1, fontSize:12, padding:"8px", opacity:0.6 }}>
+                  Skip song
+                </Btn>
+                {prevSnapshot && (
+                  <Btn variant="ghost" onClick={undoPrevSong}
+                    style={{ flex:1, fontSize:12, padding:"8px", color:T.accent, borderColor:T.accent }}>
+                    ← Prev Song
+                  </Btn>
+                )}
+              </div>
             </React.Fragment>
           )}
         </div>
       ) : (
-        <div style={{ display:"flex", gap:10, marginTop:8 }}>
-          <Btn variant="ghost" onClick={() => submitSong(true)} style={{ flex:1 }}>Skip Song</Btn>
-          <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:2 }}>Next Song →</Btn>
+        <div style={{ marginTop:8 }}>
+          <div style={{ display:"flex", gap:10, marginBottom:8 }}>
+            <Btn variant="ghost" onClick={() => submitSong(true)} style={{ flex:1 }}>Skip Song</Btn>
+            <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:2 }}>Next Song →</Btn>
+          </div>
+          {prevSnapshot && (
+            <Btn variant="ghost" onClick={undoPrevSong}
+              style={{ width:"100%", fontSize:12, padding:"8px", color:T.accent, borderColor:T.accent }}>
+              ← Undo Previous Song
+            </Btn>
+          )}
         </div>
       )}
 
@@ -1064,7 +1131,7 @@ function SummaryScreen({ game, onHome }) {
 // ─── Scoreboard ───────────────────────────────────────────────────────────────
 function ScoreboardScreen({ allGames, playlists, onBack }) {
   const [tab, setTab]           = useState("rankings");
-  const [sortBy, setSortBy]     = useState("points");
+  const [sortBy, setSortBy]     = useState("avg_pts");  // avg_pts | avg_ppm | avg_ratio | best_pts | best_ppm | best_ratio
   const [sortDir, setSortDir]   = useState("desc");
   const [fMode, setFMode]       = useState("all");
   const [fPl, setFPl]           = useState("all");
@@ -1079,9 +1146,15 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
 
   const sorted = [...Object.values(playerMap)].sort((a,b) => {
     let va, vb;
-    if (sortBy==="points")     { va=a.correct; vb=b.correct; }
-    else if (sortBy==="ratio") { va=a.incorrect?a.correct/a.incorrect:a.correct; vb=b.incorrect?b.correct/b.incorrect:b.correct; }
-    else                       { va=a.minutesPlayed?a.correct/a.minutesPlayed:0; vb=b.minutesPlayed?b.correct/b.minutesPlayed:0; }
+    switch(sortBy) {
+      case "avg_pts":   va=a.avgCorrect;  vb=b.avgCorrect;  break;
+      case "avg_ppm":   va=a.avgPpm;      vb=b.avgPpm;      break;
+      case "avg_ratio": va=a.avgRatio;    vb=b.avgRatio;    break;
+      case "best_pts":  va=a.bestGame?.correct??-1;  vb=b.bestGame?.correct??-1;  break;
+      case "best_ppm":  va=a.bestGame?.ppm??-1;      vb=b.bestGame?.ppm??-1;      break;
+      case "best_ratio":va=a.bestGame?.ratio??-1;    vb=b.bestGame?.ratio??-1;    break;
+      default:          va=a.avgCorrect;  vb=b.avgCorrect;
+    }
     return sortDir==="desc" ? vb-va : va-vb;
   }).slice(0,10);
 
@@ -1113,10 +1186,30 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
       <div style={{ marginBottom:14 }} />
 
       {tab==="rankings" && <>
+        {/* Best vs Average toggle */}
+        <div style={{ display:"flex", gap:4, background:T.surface, borderRadius:10, padding:4, marginBottom:10 }}>
+          {[["avg","Averages"],["best","Best Game"]].map(([v,l]) => (
+            <button key={v} onClick={() => setSortBy(prev => {
+                // when switching view, reset to default sort for that view
+                if (v==="avg") setSortDir("desc");
+                return v==="avg" ? "avg_pts" : "best_pts";
+              })}
+              style={{ flex:1, padding:"7px 4px", borderRadius:8, border:"none",
+                background: (sortBy.startsWith(v)) ? T.card : "transparent",
+                color: (sortBy.startsWith(v)) ? T.text : T.muted,
+                fontSize:13, fontWeight:600, cursor:"pointer", transition:"all .15s" }}>
+              {l}
+            </button>
+          ))}
+        </div>
+        {/* Sort buttons */}
         <div style={{ display:"flex", gap:6, marginBottom:12 }}>
-          {[["points","Most Pts"],["ratio","+/- Ratio"],["ppm","Pts/Min"]].map(([v,l]) => (
+          {(sortBy.startsWith("avg")
+            ? [["avg_pts","Pts/Game"],["avg_ppm","Pts/Min"],["avg_ratio","+/- Ratio"]]
+            : [["best_pts","Most Pts"],["best_ppm","Pts/Min"],["best_ratio","+/- Ratio"]]
+          ).map(([v,l]) => (
             <button key={v}
-              onClick={() => { if(sortBy===v) setSortDir(d=>d==="desc"?"asc":"desc"); else{setSortBy(v);setSortDir("desc");} }}
+              onClick={() => { if(sortBy===v) setSortDir(d=>d==="desc"?"asc":"desc"); else { setSortBy(v); setSortDir("desc"); } }}
               style={{ flex:1, padding:"7px 4px", borderRadius:8, border:`1px solid ${sortBy===v?T.accent:T.border}`,
                 background: sortBy===v?`${T.accent}22`:T.card, color: sortBy===v?T.accent:T.muted,
                 fontSize:11, fontWeight:600, cursor:"pointer" }}>
@@ -1126,24 +1219,35 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
         </div>
         {sorted.length===0
           ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No games yet</div>
-          : sorted.map((r,i) => (
-            <Card key={r.name} style={{ marginBottom:8 }}>
-              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                <span style={{ color:i<3?T.accent:T.muted, fontSize:16, width:24 }}>
-                  {i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}
-                </span>
-                <div style={{ flex:1 }}>
-                  <div style={{ color:T.text, fontWeight:700 }}>{r.name}</div>
-                  <div style={{ color:T.muted, fontSize:11 }}>{Math.round(r.minutesPlayed)}m · {r.songsPlayed} songs</div>
+          : sorted.map((r,i) => {
+            const showAvg = sortBy.startsWith("avg");
+            const mainVal = showAvg
+              ? r.avgCorrect.toFixed(1)
+              : (r.bestGame ? r.bestGame.correct : "—");
+            const subVal = showAvg
+              ? `${r.avgPpm.toFixed(1)}/min avg`
+              : (r.bestGame ? `${r.bestGame.ppm.toFixed(1)}/min` : "");
+            return (
+              <Card key={r.name} style={{ marginBottom:8 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <span style={{ color:i<3?T.accent:T.muted, fontSize:16, width:24 }}>
+                    {i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}
+                  </span>
+                  <div style={{ flex:1 }}>
+                    <div style={{ color:T.text, fontWeight:700 }}>{r.name}</div>
+                    <div style={{ color:T.muted, fontSize:11 }}>
+                      {r.gameCount} game{r.gameCount!==1?"s":""} · {Math.round(r.minutesPlayed)}m total
+                    </div>
+                  </div>
+                  <div style={{ textAlign:"right", marginRight:4 }}>
+                    <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{mainVal}</div>
+                    <div style={{ color:T.muted, fontSize:11 }}>{subVal}</div>
+                  </div>
+                  <Btn variant="ghost" small onClick={() => setDetailP(r.name)}>→</Btn>
                 </div>
-                <div style={{ textAlign:"right", marginRight:4 }}>
-                  <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{r.correct}</div>
-                  <div style={{ color:T.muted, fontSize:11 }}>{r.minutesPlayed>0?(r.correct/r.minutesPlayed).toFixed(1):"—"}/min</div>
-                </div>
-                <Btn variant="ghost" small onClick={() => setDetailP(r.name)}>→</Btn>
-              </div>
-            </Card>
-          ))
+              </Card>
+            );
+          })
         }
         <Modal open={!!detailP} onClose={() => setDetailP(null)} title={detailP||""}>
           {detailP && playerMap[detailP] && <PlayerStatsCard p={playerMap[detailP]} />}
@@ -1164,29 +1268,60 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
 }
 
 function PlayerStatsCard({ p }) {
+  const fmt = (n) => Number.isInteger(n) ? n : n.toFixed(1);
   return (
     <div>
-      {[["Points",p.correct,T.accent],
-        ["Wrong guesses", p.incorrect>0?(Number.isInteger(p.incorrect)?p.incorrect:p.incorrect.toFixed(1)):0, T.red],
-        ["Pts / Min",p.minutesPlayed>0?(p.correct/p.minutesPlayed).toFixed(2):"—",T.blue],
-        ["+/- Ratio",p.incorrect?(p.correct/p.incorrect).toFixed(2):p.correct>0?"∞":"—",T.green],
-        ["Minutes",Math.round(p.minutesPlayed),T.muted],
-        ["Songs",p.songsPlayed,T.muted]
+      <Lbl>Totals</Lbl>
+      {[["Games",p.gameCount,T.text],
+        ["Total Points",p.correct,T.accent],
+        ["Total Wrong", p.incorrect>0?fmt(p.incorrect):0, T.red],
+        ["Total Minutes",Math.round(p.minutesPlayed),T.muted],
+        ["Total Songs",p.songsPlayed,T.muted],
       ].map(([label,val,color]) => (
-        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"8px 0", borderBottom:`1px solid ${T.border}` }}>
+        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
           <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
           <span style={{ color, fontWeight:700 }}>{val}</span>
         </div>
       ))}
-      <div style={{ marginTop:12 }}>
-        <Lbl>Category %</Lbl>
-        {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => (
-          <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:`1px solid ${T.border}` }}>
-            <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
-            <span style={{ color:T.text, fontSize:13 }}>{fmtPct(p[k][0],p[k][1])} ({p[k][0]}/{p[k][1]})</span>
+
+      <Lbl style={{ marginTop:14 }}>Averages per game</Lbl>
+      {[["Points",p.avgCorrect.toFixed(1),T.accent],
+        ["Wrong guesses",p.avgIncorrect.toFixed(1),T.red],
+        ["Pts / Min",p.avgPpm.toFixed(2),T.blue],
+        ["+/- Ratio",p.avgRatio>0?p.avgRatio.toFixed(2):"—",T.green],
+      ].map(([label,val,color]) => (
+        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
+          <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
+          <span style={{ color, fontWeight:700 }}>{val}</span>
+        </div>
+      ))}
+
+      {p.bestGame ? <>
+        <Lbl style={{ marginTop:14 }}>Best game <span style={{ color:T.muted, fontWeight:400, textTransform:"none", fontSize:10 }}>(min. 10 min)</span></Lbl>
+        {[["Points",p.bestGame.correct,T.accent],
+          ["Wrong",fmt(p.bestGame.incorrect),T.red],
+          ["Pts / Min",p.bestGame.ppm.toFixed(2),T.blue],
+          ["+/- Ratio",isFinite(p.bestGame.ratio)?p.bestGame.ratio.toFixed(2):"∞",T.green],
+          ["Duration",`${Math.round(p.bestGame.minutes)}m`,T.muted],
+        ].map(([label,val,color]) => (
+          <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
+            <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
+            <span style={{ color, fontWeight:700 }}>{val}</span>
           </div>
         ))}
-      </div>
+      </> : (
+        <div style={{ color:T.muted, fontSize:12, marginTop:12, fontStyle:"italic" }}>
+          No qualifying games yet (need 10+ minutes)
+        </div>
+      )}
+
+      <Lbl style={{ marginTop:14 }}>Category % (all time)</Lbl>
+      {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => (
+        <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:`1px solid ${T.border}` }}>
+          <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
+          <span style={{ color:T.text, fontSize:13 }}>{fmtPct(p[k][0],p[k][1])} ({p[k][0]}/{p[k][1]})</span>
+        </div>
+      ))}
     </div>
   );
 }
