@@ -43,11 +43,21 @@ const fbDb   = firebase.database();
 const db = {
   // Users
   getUser:    (uid)       => fbDb.ref(`users/${uid}`).get().then(s => s.val()),
-  setUser:    (uid, data) => fbDb.ref(`users/${uid}`).set(data),
+  setUser: (uid, data) => {
+    const d = { displayName: data.displayName, email: data.email };
+    if (data.photoURL) d.photoURL = data.photoURL;
+    return fbDb.ref(`users/${uid}`).set(d);
+  },
   updateUser: (uid, data) => fbDb.ref(`users/${uid}`).update(data),
 
   // Games — write
-  saveGame: (game) => fbDb.ref(`games/${game.id}`).set(game),
+  saveGame: (game) => {
+    // Firebase rejects objects with null values — strip optional nulls before writing
+    const data = { ...game };
+    if (data.playlistUrl === null) delete data.playlistUrl;
+    if (data.ownerName   === null) delete data.ownerName;
+    return fbDb.ref(`games/${game.id}`).set(data);
+  },
   updateGame: (gameId, data) => fbDb.ref(`games/${gameId}`).update(data),
 
   // Games — read (owner's own games)
@@ -82,7 +92,12 @@ const db = {
     });
     return () => ref.off();
   },
-  savePlaylist: (pl) => fbDb.ref(`playlists/${pl.id}`).set(pl),
+  savePlaylist: (pl) => {
+    // Firebase rejects objects with null values — strip url if not set
+    const data = { id:pl.id, name:pl.name };
+    if (pl.url) data.url = pl.url;
+    return fbDb.ref(`playlists/${pl.id}`).set(data);
+  },
   deletePlaylist: (id) => fbDb.ref(`playlists/${id}`).remove(),
 
   // Shares
