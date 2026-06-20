@@ -50,12 +50,28 @@ const db = {
   },
   updateUser: (uid, data) => fbDb.ref(`users/${uid}`).update(data),
 
+  // Search registered users by name (client-side filter, fine for small groups)
+  searchUsers: (query) => fbDb.ref('users').get().then(snap => {
+    if (!snap.val()) return [];
+    const q = query.toLowerCase().trim();
+    return Object.entries(snap.val())
+      .map(([uid, u]) => ({ uid, ...u }))
+      .filter(u => u.displayName && u.displayName.toLowerCase().includes(q));
+  }),
+
   // Games — write
   saveGame: (game) => {
-    // Firebase rejects objects with null values — strip optional nulls before writing
+    // Firebase rejects null values — strip optional nulls before writing
     const data = { ...game };
     if (data.playlistUrl === null) delete data.playlistUrl;
     if (data.ownerName   === null) delete data.ownerName;
+    // Strip null accountUid from each player object
+    if (data.players) {
+      data.players = data.players.map(p => {
+        if (!p.accountUid) { const { accountUid, ...rest } = p; return rest; }
+        return p;
+      });
+    }
     return fbDb.ref(`games/${game.id}`).set(data);
   },
   updateGame: (gameId, data) => fbDb.ref(`games/${gameId}`).update(data),
@@ -311,25 +327,36 @@ function computeScores(players, songs, mode) {
 
 function buildPlayerMap(filteredGames) {
   const pm = {};
+
+  // Helper: get the stable key for a player — accountUid if linked, else name
+  function playerKey(p) { return p.accountUid || p.name; }
+
   filteredGames.forEach(g => {
     const songs = (g.songs||[]).filter(s=>!s.skipped);
     computeScores(g.players, g.songs||[], g.mode).forEach(s => {
-      if (!pm[s.name]) pm[s.name] = { name:s.name, correct:0, incorrect:0, songsPlayed:0, minutesPlayed:0, title:[0,0], artist:[0,0], album:[0,0] };
-      pm[s.name].correct += s.correct;
-      pm[s.name].incorrect += s.incorrect;
-      pm[s.name].songsPlayed += songs.length;
-      pm[s.name].minutesPlayed += (g.elapsedSeconds||0)/60;
+      // Find the full player object to check for accountUid
+      const playerObj = g.players.find(p=>p.id===s.id);
+      const key = playerObj ? playerKey(playerObj) : s.name;
+      if (!pm[key]) pm[key] = { name:s.name, accountUid: playerObj?.accountUid||null, correct:0, incorrect:0, songsPlayed:0, minutesPlayed:0, title:[0,0], artist:[0,0], album:[0,0] };
+      // Always use the most recent display name for linked accounts
+      pm[key].name = s.name;
+      pm[key].correct += s.correct;
+      pm[key].incorrect += s.incorrect;
+      pm[key].songsPlayed += songs.length;
+      pm[key].minutesPlayed += (g.elapsedSeconds||0)/60;
     });
     songs.forEach(song => {
       ["title","artist","album"].forEach(cat => {
         const r = song[cat];
         if (!r || r.type==="null") return;
         g.players.forEach(p => {
-          if (pm[p.name]) pm[p.name][cat][1]++;
+          const key = playerKey(p);
+          if (pm[key]) pm[key][cat][1]++;
         });
         if (r.type==="player") {
-          const n = g.players.find(p=>p.id===r.playerId)?.name;
-          if (n && pm[n]) pm[n][cat][0]++;
+          const p = g.players.find(p=>p.id===r.playerId);
+          const key = p ? playerKey(p) : null;
+          if (key && pm[key]) pm[key][cat][0]++;
         }
       });
     });
@@ -483,21 +510,116 @@ function HomeScreen({ onNav, myGames, user }) {
   );
 }
 
+// ─── Player input with account search ────────────────────────────────────────
+function PlayerInput({ value, onChange, placeholder, color, onRemove, currentUserUid }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [showDrop, setShowDrop]       = useState(false);
+  const debounceRef = useRef(null);
+
+  function handleChange(text) {
+    onChange({ name: text, accountUid: null }); // clear link when typing
+    setShowDrop(false);
+    clearTimeout(debounceRef.current);
+    if (text.trim().length < 2) { setSuggestions([]); return; }
+    debounceRef.current = setTimeout(async () => {
+      const results = await db.searchUsers(text);
+      // Don't suggest the current signed-in user — they're already slot 0
+      const filtered = results.filter(u => u.uid !== currentUserUid);
+      setSuggestions(filtered);
+      setShowDrop(filtered.length > 0);
+    }, 300);
+  }
+
+  function pickSuggestion(u) {
+    onChange({ name: u.displayName, accountUid: u.uid });
+    setSuggestions([]);
+    setShowDrop(false);
+  }
+
+  return (
+    <div style={{ position:"relative", flex:1 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+        <TInput
+          value={value.name}
+          onChange={text => handleChange(text)}
+          placeholder={placeholder}
+        />
+        {value.accountUid && (
+          <span style={{ fontSize:11, color:T.green, fontWeight:700, whiteSpace:"nowrap",
+            background:"#14532D", padding:"3px 8px", borderRadius:20, flexShrink:0 }}>✓ linked</span>
+        )}
+      </div>
+      {showDrop && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, zIndex:200,
+          background:T.surface, border:`1px solid ${T.border}`, borderRadius:10,
+          marginTop:4, overflow:"hidden", boxShadow:"0 4px 16px rgba(0,0,0,0.4)" }}>
+          {suggestions.map(u => (
+            <button key={u.uid} onClick={() => pickSuggestion(u)}
+              style={{ display:"flex", alignItems:"center", gap:10, width:"100%",
+                padding:"10px 14px", background:"none", borderBottom:`1px solid ${T.border}`,
+                color:T.text, fontSize:14, textAlign:"left", cursor:"pointer" }}>
+              <div style={{ width:28, height:28, borderRadius:"50%", background:color,
+                display:"flex", alignItems:"center", justifyContent:"center",
+                color:"#0E1117", fontWeight:800, fontSize:12, flexShrink:0 }}>
+                {u.displayName?.[0]?.toUpperCase()}
+              </div>
+              <div>
+                <div style={{ fontWeight:600 }}>{u.displayName}</div>
+                <div style={{ fontSize:11, color:T.muted }}>Tap to link account</div>
+              </div>
+            </button>
+          ))}
+          <button onClick={() => setShowDrop(false)}
+            style={{ display:"block", width:"100%", padding:"8px 14px",
+              background:"none", color:T.muted, fontSize:12, textAlign:"left", cursor:"pointer" }}>
+            Keep as guest
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Setup ────────────────────────────────────────────────────────────────────
 function SetupScreen({ playlists, onStart, onBack, user }) {
+  // Each player: { name: string, accountUid: string|null }
+  // First slot is always pre-linked to the signed-in host
   const [mode, setMode]           = useState("solo");
-  const [players, setPlayers]     = useState([user.displayName, ""]);
+  const [players, setPlayers]     = useState([
+    { name: user.displayName, accountUid: user.uid },
+    { name: "", accountUid: null },
+  ]);
   const [albumEnabled, setAlbumEnabled] = useState(false);
   const [selPl, setSelPl]         = useState("");
   const [newPl, setNewPl]         = useState("");
   const [newPlUrl, setNewPlUrl]   = useState("");
   const [showNewPl, setShowNewPl] = useState(false);
 
-  const canStart = mode==="solo" ? players[0].trim() : players.filter(p=>p.trim()).length >= 2;
+  const canStart = mode==="solo"
+    ? players[0].name.trim()
+    : players.filter(p=>p.name.trim()).length >= 2;
   const selPlObj = selPl ? playlists.find(p => p.name === selPl) : null;
 
+  function updatePlayer(i, val) {
+    setPlayers(players.map((p,j) => j===i ? val : p));
+  }
+
+  function removePlayer(i) {
+    setPlayers(players.filter((_,j) => j!==i));
+  }
+
+  function addPlayer() {
+    setPlayers([...players, { name:"", accountUid:null }]);
+  }
+
   function handleStart() {
-    const named = players.filter(p=>p.trim()).map(n=>({ id:uid(), name:n.trim() }));
+    const named = players
+      .filter(p => p.name.trim())
+      .map(p => ({
+        id: uid(),
+        name: p.name.trim(),
+        ...(p.accountUid ? { accountUid: p.accountUid } : {}),
+      }));
     const playlistUrl = selPlObj?.url || (showNewPl ? newPlUrl.trim() : "") || null;
     onStart({ mode, players:named, albumEnabled, playlist: selPl || newPl.trim() || null, playlistUrl });
   }
@@ -518,16 +640,32 @@ function SetupScreen({ playlists, onStart, onBack, user }) {
         <Lbl>{mode==="solo" ? "Player(s)" : "Players"}</Lbl>
         {players.map((p,i) => (
           <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"center" }}>
-            <div style={{ width:8, height:8, borderRadius:"50%", background:PC[i], flexShrink:0 }} />
-            <TInput value={p} onChange={v => setPlayers(players.map((x,j)=>j===i?v:x))}
-              placeholder={mode==="solo" ? (i===0?"Your name":`Player ${i+1}`) : `Player ${i+1}`} />
-            {(mode==="multi" ? players.length>2 : players.length>1) && (
-              <Btn variant="ghost" small onClick={() => setPlayers(players.filter((_,j)=>j!==i))} style={{ flexShrink:0 }}>✕</Btn>
+            <div style={{ width:8, height:8, borderRadius:"50%", background:PC[i], flexShrink:0, marginTop:2 }} />
+            {i === 0 ? (
+              // Host slot — name is editable but always linked to signed-in user
+              <div style={{ flex:1, display:"flex", alignItems:"center", gap:6 }}>
+                <TInput value={p.name}
+                  onChange={v => updatePlayer(0, { name:v, accountUid: user.uid })}
+                  placeholder="Your name" />
+                <span style={{ fontSize:11, color:T.green, fontWeight:700, whiteSpace:"nowrap",
+                  background:"#14532D", padding:"3px 8px", borderRadius:20, flexShrink:0 }}>you</span>
+              </div>
+            ) : (
+              <PlayerInput
+                value={p}
+                onChange={val => updatePlayer(i, val)}
+                placeholder={mode==="solo" ? `Player ${i+1}` : `Player ${i+1}`}
+                color={PC[i]}
+                currentUserUid={user.uid}
+              />
+            )}
+            {(mode==="multi" ? players.length>2 : players.length>1) && i > 0 && (
+              <Btn variant="ghost" small onClick={() => removePlayer(i)} style={{ flexShrink:0 }}>✕</Btn>
             )}
           </div>
         ))}
         {players.length < 8 && (
-          <Btn variant="ghost" small onClick={() => setPlayers([...players,""])} style={{ marginTop:4 }}>
+          <Btn variant="ghost" small onClick={addPlayer} style={{ marginTop:4 }}>
             + Add {mode==="solo" ? "team member" : "player"}
           </Btn>
         )}
