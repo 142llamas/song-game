@@ -4,9 +4,14 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <title>Song Game</title>
+<!-- React -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; background: #0E1117; font-family: -apple-system, 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -19,44 +24,84 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+// ─── Firebase init (outside Babel so it runs first) ───────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDd_740yoJdN82QxrSqmE0mGWtt8iwq2es",
+  authDomain: "song-game-739c7.firebaseapp.com",
+  databaseURL: "https://song-game-739c7-default-rtdb.firebaseio.com",
+  projectId: "song-game-739c7",
+  storageBucket: "song-game-739c7.firebasestorage.app",
+  messagingSenderId: "223773638618",
+  appId: "1:223773638618:web:ffdfaaa3871ae8893ccae3"
+};
+firebase.initializeApp(firebaseConfig);
+const fbAuth = firebase.auth();
+const fbDb   = firebase.database();
+
+// ─── Firebase helpers ─────────────────────────────────────────────────────────
+const db = {
+  // Users
+  getUser:    (uid)       => fbDb.ref(`users/${uid}`).get().then(s => s.val()),
+  setUser:    (uid, data) => fbDb.ref(`users/${uid}`).set(data),
+  updateUser: (uid, data) => fbDb.ref(`users/${uid}`).update(data),
+
+  // Games — write
+  saveGame: (game) => fbDb.ref(`games/${game.id}`).set(game),
+  updateGame: (gameId, data) => fbDb.ref(`games/${gameId}`).update(data),
+
+  // Games — read (owner's own games)
+  listenMyGames: (uid, cb) => {
+    const ref = fbDb.ref('games').orderByChild('ownerUid').equalTo(uid);
+    ref.on('value', snap => {
+      const games = [];
+      snap.forEach(child => games.push(child.val()));
+      cb(games.sort((a,b) => (b.startedAt||0) - (a.startedAt||0)));
+    });
+    return () => ref.off();
+  },
+
+  // Games — read all (for leaderboard)
+  listenAllGames: (cb) => {
+    const ref = fbDb.ref('games');
+    ref.on('value', snap => {
+      const games = [];
+      snap.forEach(child => games.push(child.val()));
+      cb(games);
+    });
+    return () => ref.off();
+  },
+
+  // Playlists — shared globally
+  listenPlaylists: (cb) => {
+    const ref = fbDb.ref('playlists');
+    ref.on('value', snap => {
+      const pls = [];
+      snap.forEach(child => pls.push(child.val()));
+      cb(pls);
+    });
+    return () => ref.off();
+  },
+  savePlaylist: (pl) => fbDb.ref(`playlists/${pl.id}`).set(pl),
+  deletePlaylist: (id) => fbDb.ref(`playlists/${id}`).remove(),
+
+  // Shares
+  saveShare: (code, data) => fbDb.ref(`shares/${code}`).set(data),
+  getShare:  (code)       => fbDb.ref(`shares/${code}`).get().then(s => s.val()),
+};
+</script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
-
-// ─── Firebase config — fill in your project values ───────────────────────────
-// Replace these with the values from your Firebase project settings.
-// Realtime Database → your project → Project Settings → Your apps → Config
-const FB = {
-  dbUrl: "https://song-game-739c7-default-rtdb.firebaseio.com/", // e.g. https://my-song-game-default-rtdb.firebaseio.com
-};
-// In your Firebase Realtime Database rules, add a TTL cleanup rule or simply
-// set rules to allow read/write (for personal use). Suggested rules:
-// {
-//   "rules": {
-//     "shares": {
-//       ".read": true,
-//       ".write": true
-//     }
-//   }
-// }
-
-// ─── Storage (localStorage) ───────────────────────────────────────────────────
-const KEYS = { games: "sg_games", playlists: "sg_playlists" };
-function loadData(key) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : []; } catch { return []; }
-}
-function saveData(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-}
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
 function fmtTime(s) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
   return h > 0
     ? `${h}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`
     : `${m}:${String(sec).padStart(2,"0")}`;
 }
-function fmtPct(n, d) { if (!d) return "—"; return Math.round((n / d) * 100) + "%"; }
+function fmtPct(n,d) { if (!d) return "—"; return Math.round((n/d)*100)+"%"; }
 
 // ─── Design tokens ────────────────────────────────────────────────────────────
 const T = {
@@ -76,11 +121,11 @@ function Btn({ children, onClick, variant="primary", disabled, style={}, small }
     opacity: disabled ? .4 : 1, cursor: disabled ? "not-allowed" : "pointer",
   };
   const V = {
-    primary:   { background: T.accent, color: "#0E1117" },
-    secondary: { background: T.card, color: T.text, border: `1px solid ${T.border}` },
-    ghost:     { background: "transparent", color: T.muted, border: `1px solid ${T.border}` },
-    danger:    { background: "#7F1D1D", color: "#FCA5A5", border: "1px solid #991B1B" },
-    success:   { background: "#14532D", color: T.green, border: "1px solid #166534" },
+    primary:   { background:T.accent, color:"#0E1117" },
+    secondary: { background:T.card, color:T.text, border:`1px solid ${T.border}` },
+    ghost:     { background:"transparent", color:T.muted, border:`1px solid ${T.border}` },
+    danger:    { background:"#7F1D1D", color:"#FCA5A5", border:"1px solid #991B1B" },
+    success:   { background:"#14532D", color:T.green, border:"1px solid #166534" },
   };
   return <button onClick={disabled ? undefined : onClick} style={{...base,...V[variant],...style}}>{children}</button>;
 }
@@ -93,8 +138,8 @@ function Lbl({ children, style={} }) {
   return <div style={{ fontSize:11, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", color:T.muted, marginBottom:6, ...style }}>{children}</div>;
 }
 
-function TInput({ value, onChange, placeholder, style={} }) {
-  return <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+function TInput({ value, onChange, placeholder, style={}, type="text" }) {
+  return <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
     style={{ background:T.surface, border:`1px solid ${T.border}`, borderRadius:8, padding:"10px 12px",
       color:T.text, fontSize:15, width:"100%", outline:"none", ...style }} />;
 }
@@ -156,9 +201,19 @@ function Sel({ value, onChange, children, style={} }) {
   );
 }
 
+function Spinner({ size=20 }) {
+  const spin = `@keyframes spin { to { transform: rotate(360deg); } }`;
+  return (
+    <>
+      <style>{spin}</style>
+      <div style={{ width:size, height:size, border:`2px solid ${T.border}`,
+        borderTopColor:T.accent, borderRadius:"50%", animation:"spin 0.7s linear infinite" }} />
+    </>
+  );
+}
+
 function PlaylistLink({ url, style={} }) {
   if (!url) return null;
-  // Detect platform for a nice label
   let label = "Open playlist ↗";
   try {
     const h = new URL(url).hostname.toLowerCase();
@@ -177,41 +232,29 @@ function PlaylistLink({ url, style={} }) {
   );
 }
 
-
-function useTimer(init = 0) {
-  const [secs, setSecs] = useState(init);
+// ─── Timer hook ───────────────────────────────────────────────────────────────
+function useTimer(init=0) {
+  const [secs, setSecs]       = useState(init);
   const [running, setRunning] = useState(false);
   const intervalRef = useRef(null);
-  const runningRef  = useRef(running);
-  runningRef.current = running;
 
   useEffect(() => {
     if (running) {
-      intervalRef.current = setInterval(() => setSecs(s => s + 1), 1000);
+      intervalRef.current = setInterval(() => setSecs(s => s+1), 1000);
     } else {
       clearInterval(intervalRef.current);
     }
     return () => clearInterval(intervalRef.current);
   }, [running]);
 
-  // Stable refs so callers can safely use these in useEffect([])
   const startRef  = useRef(() => setRunning(true));
   const pauseRef  = useRef(() => setRunning(false));
   const toggleRef = useRef(() => setRunning(r => !r));
 
-  return {
-    secs, running,
-    start:  startRef.current,
-    pause:  pauseRef.current,
-    toggle: toggleRef.current,
-  };
+  return { secs, running, start:startRef.current, pause:pauseRef.current, toggle:toggleRef.current };
 }
 
 // ─── Score computation ────────────────────────────────────────────────────────
-// Points-against rules (solo mode):
-//   wrong guess on a normal/none category  -> -1 each
-//   said_in_song                           -> -0.5 per wrong guess logged before it was called
-//   no_category (N/A) or skipped           -> 0, not counted at all
 function computeScores(players, songs, mode) {
   const stats = {};
   players.forEach(p => {
@@ -222,17 +265,16 @@ function computeScores(players, songs, mode) {
       const r = song[cat];
       if (!r) return;
       if (r.type === "null") {
-        // said_in_song -> -0.5 per wrong; no_category -> 0
         const penalty = (r.reason === "said_in_song") ? 0.5 : 0;
         if (penalty > 0 && r.incorrects) {
-          Object.entries(r.incorrects).forEach(([pid, v]) => {
+          Object.entries(r.incorrects).forEach(([pid,v]) => {
             if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v) * penalty;
           });
         }
         return;
       }
       if (r.type === "none") {
-        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid, v]) => {
+        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid,v]) => {
           if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v);
         });
         return;
@@ -243,7 +285,7 @@ function computeScores(players, songs, mode) {
           stats[r.playerId][cat][0]++;
           stats[r.playerId][cat][1]++;
         }
-        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid, v]) => {
+        if (r.incorrects) Object.entries(r.incorrects).forEach(([pid,v]) => {
           if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v);
         });
       }
@@ -258,16 +300,15 @@ function buildPlayerMap(filteredGames) {
     const songs = (g.songs||[]).filter(s=>!s.skipped);
     computeScores(g.players, g.songs||[], g.mode).forEach(s => {
       if (!pm[s.name]) pm[s.name] = { name:s.name, correct:0, incorrect:0, songsPlayed:0, minutesPlayed:0, title:[0,0], artist:[0,0], album:[0,0] };
-      pm[s.name].correct += s.correct; pm[s.name].incorrect += s.incorrect;
+      pm[s.name].correct += s.correct;
+      pm[s.name].incorrect += s.incorrect;
       pm[s.name].songsPlayed += songs.length;
       pm[s.name].minutesPlayed += (g.elapsedSeconds||0)/60;
     });
-    // Category denominators: each player gets +1 possible for each scoreable category per song
     songs.forEach(song => {
       ["title","artist","album"].forEach(cat => {
         const r = song[cat];
         if (!r || r.type==="null") return;
-        // One possible point per player per scoreable category
         g.players.forEach(p => {
           if (pm[p.name]) pm[p.name][cat][1]++;
         });
@@ -288,7 +329,6 @@ function buildPlaylistMap(allGames, allPlaylists) {
     pl[g.playlist].games.push(g);
   });
   Object.values(pl).forEach(p => {
-    // Attach URL from playlists store or from any game that has it
     const plObj = (allPlaylists||[]).find(x=>x.name===p.name);
     p.url = plObj?.url || p.games.find(g=>g.playlistUrl)?.playlistUrl || null;
     const songs = p.games.flatMap(g=>(g.songs||[]).filter(s=>!s.skipped));
@@ -307,21 +347,101 @@ function buildPlaylistMap(allGames, allPlaylists) {
   return pl;
 }
 
+// ─── Auth Screen ──────────────────────────────────────────────────────────────
+function AuthScreen({ onSignedIn }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError]     = useState(null);
+
+  async function signInWithGoogle() {
+    setLoading(true); setError(null);
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await fbAuth.signInWithPopup(provider);
+      // onSignedIn called by auth state listener in App
+    } catch (e) {
+      setError(e.code === "auth/popup-closed-by-user"
+        ? "Sign-in was cancelled."
+        : "Sign-in failed. Please try again.");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center", padding:24, background:T.bg }}>
+      <div style={{ width:"100%", maxWidth:360, textAlign:"center" }}>
+        <div style={{ fontSize:64, marginBottom:12 }}>🎶</div>
+        <h1 style={{ color:T.text, fontSize:30, fontWeight:900, letterSpacing:"-0.03em", marginBottom:8 }}>Song Game</h1>
+        <p style={{ color:T.muted, fontSize:14, marginBottom:40, lineHeight:1.6 }}>
+          Keep score. Remember everything.<br/>Sign in to save your games and see the leaderboard.
+        </p>
+
+        <button onClick={signInWithGoogle} disabled={loading}
+          style={{ width:"100%", padding:"14px 20px", borderRadius:12, border:`1px solid ${T.border}`,
+            background:T.card, color:T.text, fontSize:15, fontWeight:600, cursor: loading ? "not-allowed" : "pointer",
+            display:"flex", alignItems:"center", justifyContent:"center", gap:12, opacity: loading ? 0.6 : 1 }}>
+          {loading ? <Spinner size={18} /> : (
+            <svg width="18" height="18" viewBox="0 0 18 18">
+              <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z"/>
+              <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/>
+              <path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/>
+              <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 6.29C4.672 4.163 6.656 3.58 9 3.58z"/>
+            </svg>
+          )}
+          {loading ? "Signing in…" : "Sign in with Google"}
+        </button>
+
+        {error && (
+          <p style={{ color:T.red, fontSize:13, marginTop:16 }}>{error}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Profile Setup Screen (first time) ───────────────────────────────────────
+function ProfileSetupScreen({ googleName, onSave }) {
+  const [name, setName] = useState(googleName || "");
+
+  return (
+    <div style={{ minHeight:"100vh", display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center", padding:24, background:T.bg }}>
+      <div style={{ width:"100%", maxWidth:360 }}>
+        <div style={{ textAlign:"center", marginBottom:32 }}>
+          <div style={{ fontSize:48, marginBottom:8 }}>👋</div>
+          <h2 style={{ color:T.text, fontSize:22, fontWeight:800, marginBottom:8 }}>What should we call you?</h2>
+          <p style={{ color:T.muted, fontSize:13, lineHeight:1.6 }}>
+            This is the name that appears on the scoreboard when you play.
+          </p>
+        </div>
+        <TInput value={name} onChange={setName} placeholder="Your player name"
+          style={{ marginBottom:16, fontSize:17, textAlign:"center" }} />
+        <Btn onClick={() => onSave(name.trim())} disabled={!name.trim()}
+          style={{ width:"100%", padding:14, fontSize:16 }}>
+          Let's Play →
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
 // ─── Home ─────────────────────────────────────────────────────────────────────
-function HomeScreen({ onNav, games }) {
-  const recent = [...games].sort((a,b)=>(b.startedAt||0)-(a.startedAt||0)).slice(0,3);
+function HomeScreen({ onNav, myGames, user }) {
+  const recent = myGames.slice(0, 3);
   return (
     <div style={{ padding:20, maxWidth:460, margin:"0 auto" }}>
-      <div style={{ textAlign:"center", padding:"32px 0 24px" }}>
+      <div style={{ textAlign:"center", padding:"28px 0 20px" }}>
         <div style={{ fontSize:52, marginBottom:8 }}>🎶</div>
         <h1 style={{ color:T.text, fontSize:28, fontWeight:900, letterSpacing:"-0.03em" }}>Song Game</h1>
-        <p style={{ color:T.muted, fontSize:13, marginTop:6 }}>Keep score. Remember everything.</p>
+        <p style={{ color:T.muted, fontSize:13, marginTop:4 }}>Hey {user.displayName} 👋</p>
       </div>
+
       <Btn onClick={() => onNav("setup")} style={{ width:"100%", padding:16, fontSize:17, marginBottom:12 }}>
         🎵 New Game
       </Btn>
+
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:24 }}>
-        {[["📊","Scoreboard","scoreboard"],["📜","History","history"],["💽","Playlists","playlists"],["💾","Data & Backup","data"]].map(([icon,label,s])=>(
+        {[["📊","Scoreboard","scoreboard"],["📜","My History","history"],["💽","Playlists","playlists"],["🔗","Share Data","share"]].map(([icon,label,s])=>(
           <button key={s} onClick={() => onNav(s)}
             style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:12,
               padding:"14px 8px", color:T.text, fontSize:12, fontWeight:600,
@@ -330,6 +450,7 @@ function HomeScreen({ onNav, games }) {
           </button>
         ))}
       </div>
+
       {recent.length > 0 && <>
         <Lbl>Recent Games</Lbl>
         {recent.map(g => (
@@ -348,18 +469,16 @@ function HomeScreen({ onNav, games }) {
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
-function SetupScreen({ playlists, onStart, onBack }) {
-  const [mode, setMode] = useState("solo");
-  const [players, setPlayers] = useState(["",""]);
+function SetupScreen({ playlists, onStart, onBack, user }) {
+  const [mode, setMode]           = useState("solo");
+  const [players, setPlayers]     = useState([user.displayName, ""]);
   const [albumEnabled, setAlbumEnabled] = useState(false);
-  const [selPl, setSelPl] = useState("");
-  const [newPl, setNewPl] = useState("");
-  const [newPlUrl, setNewPlUrl] = useState("");
+  const [selPl, setSelPl]         = useState("");
+  const [newPl, setNewPl]         = useState("");
+  const [newPlUrl, setNewPlUrl]   = useState("");
   const [showNewPl, setShowNewPl] = useState(false);
 
   const canStart = mode==="solo" ? players[0].trim() : players.filter(p=>p.trim()).length >= 2;
-
-  // Find URL for selected saved playlist
   const selPlObj = selPl ? playlists.find(p => p.name === selPl) : null;
 
   function handleStart() {
@@ -410,15 +529,11 @@ function SetupScreen({ playlists, onStart, onBack }) {
             {playlists.map(pl => <option key={pl.id} value={pl.name}>{pl.name}</option>)}
           </Sel>
         )}
-        {selPlObj?.url && (
-          <div style={{ marginBottom:8 }}>
-            <PlaylistLink url={selPlObj.url} />
-          </div>
-        )}
+        {selPlObj?.url && <div style={{ marginBottom:8 }}><PlaylistLink url={selPlObj.url} /></div>}
         {showNewPl ? (
           <div>
             <TInput value={newPl} onChange={setNewPl} placeholder="New playlist name" style={{ marginBottom:8 }} />
-            <TInput value={newPlUrl} onChange={setNewPlUrl} placeholder="Playlist URL (optional — Spotify, YouTube, etc.)" />
+            <TInput value={newPlUrl} onChange={setNewPlUrl} placeholder="Playlist URL (optional)" />
           </div>
         ) : (
           <Btn variant="ghost" small onClick={() => { setShowNewPl(true); setSelPl(""); }}>+ New playlist name</Btn>
@@ -451,11 +566,11 @@ function initEntry(players, albumEnabled) {
   };
 }
 
-function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists }) {
+function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
   const timer = useTimer(game.elapsedSeconds || 0);
-  const [albumOn, setAlbumOn] = useState(game.albumEnabled);
-  const [entry, setEntry] = useState(() => initEntry(game.players, game.albumEnabled));
-  const [showEnd, setShowEnd] = useState(false);
+  const [albumOn, setAlbumOn]   = useState(game.albumEnabled);
+  const [entry, setEntry]       = useState(() => initEntry(game.players, game.albumEnabled));
+  const [showEnd, setShowEnd]   = useState(false);
   const [showScores, setShowScores] = useState(false);
 
   useEffect(() => { timer.start(); }, []);
@@ -470,7 +585,6 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
       else setEntry(prev => ({ ...prev, [cat]: { ...prev[cat], dqd:{ ...prev[cat].dqd, [playerId]:true } } }));
     } else {
       if (correct) {
-        // Record correct; also bump the guess counter by +1 (net)
         setEntry(prev => ({
           ...prev,
           [cat]: {
@@ -480,7 +594,6 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
           }
         }));
       } else {
-        // Wrong guess: decrement by 1 (stored as negative = wrong)
         setEntry(prev => ({
           ...prev,
           [cat]: {
@@ -494,10 +607,9 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
 
   function catResult(cat) {
     const s = entry[cat];
-    // Build incorrects: sum of negative guesses per player (each -1 per wrong tap)
     const incorrects = {};
     Object.entries(s.guesses || {}).forEach(([pid, v]) => {
-      if (v < 0) incorrects[pid] = v; // keep as negative
+      if (v < 0) incorrects[pid] = v;
     });
     if (s.result?.type==="said_in_song") return { type:"null", reason:"said_in_song", incorrects };
     if (s.result?.type==="no_category")  return { type:"null", reason:"no_category" };
@@ -505,7 +617,7 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
     return { type:"none", incorrects };
   }
 
-  function submitSong(skipped=false) {
+  async function submitSong(skipped=false) {
     const elapsed = timer.secs;
     timer.pause();
     const song = {
@@ -515,56 +627,49 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
       artist: skipped ? null : catResult("artist"),
       album:  (!entry.album.enabled||skipped) ? null : catResult("album"),
     };
+    // Auto-save new playlist to Firebase
     if (game.playlist && !playlists.find(p=>p.name===game.playlist)) {
-      onSavePlaylists([...playlists, { id:uid(), name:game.playlist, url:game.playlistUrl||null }]);
+      const newPl = { id:uid(), name:game.playlist, url:game.playlistUrl||null };
+      await db.savePlaylist(newPl);
     }
-    onUpdateGame({ ...game, elapsedSeconds:elapsed, songs:[...(game.songs||[]), song] });
+    const updated = { ...game, elapsedSeconds:elapsed, songs:[...(game.songs||[]), song] };
+    onUpdateGame(updated);
+    await db.saveGame(updated);
     setEntry(initEntry(game.players, albumOn));
     timer.start();
   }
 
-  const [countdown, setCountdown] = useState(null); // null | 3 | 2 | 1
+  const [countdown, setCountdown] = useState(null);
 
   function handleGotAll() {
-    // Mark all active categories as correct for the first (only) player in solo
     const pid = game.players[0].id;
     const activeCats = ["title","artist",...(entry.album.enabled?["album"]:[])];
     setEntry(prev => {
       const next = { ...prev };
       activeCats.forEach(cat => {
-        // Only set correct if not already null (said_in_song / N/A)
         if (!prev[cat].result || prev[cat].result.type === "player") {
           next[cat] = { ...prev[cat], result: { type:"player", playerId:pid } };
         }
       });
       return next;
     });
-    // Start 3-second countdown
     setCountdown(3);
   }
 
-  // Keep a ref to submitSong so the countdown effect always calls the latest version
   const submitSongRef = useRef(submitSong);
   submitSongRef.current = submitSong;
 
-  // Drive countdown down each second, then submit
   useEffect(() => {
     if (countdown === null) return;
-    if (countdown === 0) {
-      setCountdown(null);
-      submitSongRef.current(false);
-      return;
-    }
-    const t = setTimeout(() => setCountdown(c => c - 1), 1000);
+    if (countdown === 0) { setCountdown(null); submitSongRef.current(false); return; }
+    const t = setTimeout(() => setCountdown(c => c-1), 1000);
     return () => clearTimeout(t);
   }, [countdown]);
 
-  function cancelCountdown() {
-    setCountdown(null);
-  }
-
-  function endGame() {
-    onEndGame({ ...game, elapsedSeconds:timer.secs, endedAt:Date.now(), status:"complete" });
+  async function endGame() {
+    const final = { ...game, elapsedSeconds:timer.secs, endedAt:Date.now(), status:"complete" };
+    await db.saveGame(final);
+    onEndGame(final);
   }
 
   const cats = ["title","artist",...(entry.album.enabled?["album"]:[])];
@@ -574,7 +679,6 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
 
   return (
     <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:100 }}>
-      {/* Header */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
         <div>
           <div style={{ color:T.accent, fontSize:24, fontWeight:800, letterSpacing:"-0.02em" }}>{fmtTime(timer.secs)}</div>
@@ -587,7 +691,6 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
         </div>
       </div>
 
-      {/* Album toggle */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
         background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
         <span style={{ color:T.muted, fontSize:13 }}>Album category</span>
@@ -601,31 +704,23 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
           onSetResult={r => setResult(cat,r)} />
       ))}
 
-      {/* Action buttons */}
       {game.mode === "solo" ? (
         <div style={{ marginTop:8 }}>
           {countdown !== null ? (
-            // Countdown overlay bar
             <div style={{ background:T.surface, border:`1px solid ${T.accent}`, borderRadius:12,
               padding:"14px 20px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
               <div>
                 <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>Next song in {countdown}…</div>
                 <div style={{ color:T.muted, fontSize:12, marginTop:2 }}>Tap cancel to go back</div>
               </div>
-              <Btn variant="ghost" onClick={cancelCountdown}>Cancel</Btn>
+              <Btn variant="ghost" onClick={() => setCountdown(null)}>Cancel</Btn>
             </div>
           ) : (
             <React.Fragment>
-              {/* Primary row: Got All + Next Song */}
               <div style={{ display:"flex", gap:10, marginBottom:10 }}>
-                <Btn variant="success" onClick={handleGotAll} style={{ flex:1 }}>
-                  ⚡ Got All →3s
-                </Btn>
-                <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:1 }}>
-                  Next Song →
-                </Btn>
+                <Btn variant="success" onClick={handleGotAll} style={{ flex:1 }}>⚡ Got All →3s</Btn>
+                <Btn variant="primary" onClick={() => submitSong(false)} style={{ flex:1 }}>Next Song →</Btn>
               </div>
-              {/* Skip — visually quieter, tucked below */}
               <Btn variant="ghost" onClick={() => submitSong(true)}
                 style={{ width:"100%", fontSize:12, padding:"8px", opacity:0.6 }}>
                 Skip song (no points recorded)
@@ -656,11 +751,9 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, onSavePlaylists 
 }
 
 function CatPanel({ cat, label, entry, players, mode, onGuess, onSetResult }) {
-  const resolved = !!entry.result;
   const isCorrect = entry.result?.type === "player";
-  const isNull = entry.result?.type === "said_in_song" || entry.result?.type === "no_category";
-  // In solo mode, track wrong-guess count for display
-  const pid = players[0]?.id;
+  const isNull    = entry.result?.type === "said_in_song" || entry.result?.type === "no_category";
+  const pid       = players[0]?.id;
   const wrongCount = mode === "solo" ? Math.abs(Math.min(0, entry.guesses?.[pid] || 0)) : 0;
 
   return (
@@ -669,10 +762,9 @@ function CatPanel({ cat, label, entry, players, mode, onGuess, onSetResult }) {
         <span style={{ color:T.text, fontWeight:700, fontSize:15 }}>{label}</span>
         {isCorrect && <span style={{ fontSize:11, color:T.green, fontWeight:700, background:"#14532D", padding:"2px 8px", borderRadius:20 }}>✓ Got it</span>}
         {isNull && entry.result?.type==="said_in_song" && <span style={{ fontSize:11, color:T.purple, fontWeight:700, background:`${T.purple}22`, padding:"2px 8px", borderRadius:20 }}>Said in song</span>}
-        {isNull && entry.result?.type==="no_category" && <span style={{ fontSize:11, color:T.muted, fontWeight:700, background:T.surface, padding:"2px 8px", borderRadius:20 }}>N/A</span>}
+        {isNull && entry.result?.type==="no_category"  && <span style={{ fontSize:11, color:T.muted, fontWeight:700, background:T.surface, padding:"2px 8px", borderRadius:20 }}>N/A</span>}
       </div>
 
-      {/* Null option pills */}
       <div style={{ display:"flex", gap:6, marginBottom:10, flexWrap:"wrap" }}>
         {[{key:"said_in_song",label:"Said in song",color:T.purple},{key:"no_category",label:"N/A",color:T.muted}].map(opt => (
           <button key={opt.key}
@@ -685,10 +777,9 @@ function CatPanel({ cat, label, entry, players, mode, onGuess, onSetResult }) {
         ))}
       </div>
 
-      {/* Player buttons */}
       <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
         {players.map((p,i) => {
-          const dqd = entry.dqd?.[p.id];
+          const dqd   = entry.dqd?.[p.id];
           const color = PC[i];
 
           if (mode === "multi") {
@@ -704,46 +795,31 @@ function CatPanel({ cat, label, entry, players, mode, onGuess, onSetResult }) {
             );
           }
 
-          // Solo mode: ✗ is default-selected (shown active) but dims once correct is set
-          // Tapping ✗ when correct is set removes the correct answer (undo)
-          const xActive = !isCorrect && !isNull; // ✗ is the "current state" when nothing positive set
-          const xDimmed = isCorrect || isNull;    // dim (but still tappable) after correct/null set
+          const xActive = !isCorrect && !isNull;
+          const xDimmed = isCorrect || isNull;
 
           return (
             <React.Fragment key={p.id}>
-              {/* ✗ button */}
               <button
                 onClick={() => {
-                  if (isCorrect) {
-                    // Undo correct answer — remove result, add a wrong guess
-                    onSetResult(null);
-                    onGuess(p.id, false);
-                  } else {
-                    onGuess(p.id, false);
-                  }
+                  if (isCorrect) { onSetResult(null); onGuess(p.id, false); }
+                  else { onGuess(p.id, false); }
                 }}
-                style={{
-                  padding:"8px 14px", borderRadius:"8px 0 0 8px",
+                style={{ padding:"8px 14px", borderRadius:"8px 0 0 8px",
                   border:`1px solid ${xActive ? T.red : T.border}`,
                   background: xActive ? `${T.red}33` : T.surface,
                   color: xActive ? T.red : T.muted,
                   fontSize:13, fontWeight:700, cursor:"pointer",
-                  opacity: xDimmed ? 0.45 : 1,
-                  transition:"opacity .15s, background .15s",
-                }}>
+                  opacity: xDimmed ? 0.45 : 1, transition:"opacity .15s, background .15s" }}>
                 ✗ {wrongCount > 0 && <span style={{ fontSize:11, marginLeft:2 }}>×{wrongCount}</span>}
               </button>
-              {/* ✓ button */}
               <button
                 onClick={() => onGuess(p.id, true)}
-                style={{
-                  padding:"8px 16px", borderRadius:"0 8px 8px 0",
+                style={{ padding:"8px 16px", borderRadius:"0 8px 8px 0",
                   border:`1px solid ${isCorrect ? color : T.border}`,
                   background: isCorrect ? `${color}33` : T.surface,
                   color: isCorrect ? color : T.muted,
-                  fontSize:13, fontWeight:700, cursor:"pointer",
-                  transition:"background .15s",
-                }}>
+                  fontSize:13, fontWeight:700, cursor:"pointer", transition:"background .15s" }}>
                 {p.name} ✓
               </button>
             </React.Fragment>
@@ -758,24 +834,23 @@ function ScoreTable({ scores, players, mode }) {
   return (
     <div>
       {[...scores].sort((a,b)=>b.correct-a.correct).map((s,i) => {
-        const pIdx = players.findIndex(p=>p.name===s.name);
+        const pIdx  = players.findIndex(p=>p.name===s.name);
         const color = PC[pIdx >= 0 ? pIdx % PC.length : i % PC.length];
         return (
-        <div key={s.name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-          padding:"10px 0", borderBottom: i<scores.length-1?`1px solid ${T.border}`:"none" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <div style={{ width:28, height:28, borderRadius:"50%", display:"flex", alignItems:"center",
-              justifyContent:"center", background:color,
-              color:"#0E1117", fontWeight:800, fontSize:12 }}>
-              {s.name[0]?.toUpperCase()}
+          <div key={s.name} style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+            padding:"10px 0", borderBottom: i<scores.length-1?`1px solid ${T.border}`:"none" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+              <div style={{ width:28, height:28, borderRadius:"50%", display:"flex", alignItems:"center",
+                justifyContent:"center", background:color, color:"#0E1117", fontWeight:800, fontSize:12 }}>
+                {s.name[0]?.toUpperCase()}
+              </div>
+              <span style={{ color:T.text, fontWeight:600 }}>{s.name}</span>
             </div>
-            <span style={{ color:T.text, fontWeight:600 }}>{s.name}</span>
+            <div style={{ textAlign:"right" }}>
+              <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{s.correct}</div>
+              {mode==="solo" && s.incorrect>0 && <div style={{ color:T.red, fontSize:11 }}>-{Number.isInteger(s.incorrect) ? s.incorrect : s.incorrect.toFixed(1)} ✗</div>}
+            </div>
           </div>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{s.correct}</div>
-            {mode==="solo" && s.incorrect>0 && <div style={{ color:T.red, fontSize:11 }}>-{Number.isInteger(s.incorrect) ? s.incorrect : s.incorrect.toFixed(1)} ✗</div>}
-          </div>
-        </div>
         );
       })}
     </div>
@@ -784,7 +859,7 @@ function ScoreTable({ scores, players, mode }) {
 
 // ─── Summary ──────────────────────────────────────────────────────────────────
 function SummaryScreen({ game, onHome }) {
-  const songs = (game.songs||[]).filter(s=>!s.skipped);
+  const songs  = (game.songs||[]).filter(s=>!s.skipped);
   const scores = [...computeScores(game.players, game.songs||[], game.mode)].sort((a,b)=>b.correct-a.correct);
   return (
     <div style={{ padding:20, maxWidth:460, margin:"0 auto" }}>
@@ -834,7 +909,7 @@ function SummaryScreen({ game, onHome }) {
 }
 
 // ─── Scoreboard ───────────────────────────────────────────────────────────────
-function ScoreboardScreen({ games, playlists, onBack }) {
+function ScoreboardScreen({ allGames, playlists, onBack }) {
   const [tab, setTab]           = useState("rankings");
   const [sortBy, setSortBy]     = useState("points");
   const [sortDir, setSortDir]   = useState("desc");
@@ -844,10 +919,10 @@ function ScoreboardScreen({ games, playlists, onBack }) {
   const [statsP, setStatsP]     = useState(null);
   const [detailPl, setDetailPl] = useState(null);
 
-  const allPl = [...new Set(games.filter(g=>g.playlist).map(g=>g.playlist))];
-  const filtered = games.filter(g => (fMode==="all"||g.mode===fMode) && (fPl==="all"||g.playlist===fPl));
+  const allPl    = [...new Set(allGames.filter(g=>g.playlist).map(g=>g.playlist))];
+  const filtered = allGames.filter(g => (fMode==="all"||g.mode===fMode) && (fPl==="all"||g.playlist===fPl));
   const playerMap   = buildPlayerMap(filtered);
-  const playlistMap = buildPlaylistMap(games, playlists);
+  const playlistMap = buildPlaylistMap(allGames, playlists);
 
   const sorted = [...Object.values(playerMap)].sort((a,b) => {
     let va, vb;
@@ -884,7 +959,6 @@ function ScoreboardScreen({ games, playlists, onBack }) {
         active={tab} onChange={v => { setTab(v); setDetailP(null); setStatsP(null); setDetailPl(null); }} />
       <div style={{ marginBottom:14 }} />
 
-      {/* Rankings */}
       {tab==="rankings" && <>
         <div style={{ display:"flex", gap:6, marginBottom:12 }}>
           {[["points","Most Pts"],["ratio","+/- Ratio"],["ppm","Pts/Min"]].map(([v,l]) => (
@@ -923,7 +997,6 @@ function ScoreboardScreen({ games, playlists, onBack }) {
         </Modal>
       </>}
 
-      {/* Player Stats */}
       {tab==="stats" && <>
         <Sel value={statsP||""} onChange={v=>setStatsP(v||null)} style={{ marginBottom:12 }}>
           <option value="">— Select player —</option>
@@ -932,7 +1005,6 @@ function ScoreboardScreen({ games, playlists, onBack }) {
         {statsP && playerMap[statsP] && <PlayerStatsCard p={playerMap[statsP]} />}
       </>}
 
-      {/* Playlists */}
       {tab==="playlists" && <PlaylistTab playlistMap={playlistMap} detailPl={detailPl} setDetailPl={setDetailPl} />}
     </div>
   );
@@ -942,7 +1014,7 @@ function PlayerStatsCard({ p }) {
   return (
     <div>
       {[["Points",p.correct,T.accent],
-        ["Wrong guesses", p.incorrect > 0 ? (Number.isInteger(p.incorrect) ? p.incorrect : p.incorrect.toFixed(1)) : 0, T.red],
+        ["Wrong guesses", p.incorrect>0?(Number.isInteger(p.incorrect)?p.incorrect:p.incorrect.toFixed(1)):0, T.red],
         ["Pts / Min",p.minutesPlayed>0?(p.correct/p.minutesPlayed).toFixed(2):"—",T.blue],
         ["+/- Ratio",p.incorrect?(p.correct/p.incorrect).toFixed(2):p.correct>0?"∞":"—",T.green],
         ["Minutes",Math.round(p.minutesPlayed),T.muted],
@@ -1084,12 +1156,12 @@ function PlaylistDetail({ pl, expPlayer, setExpPlayer }) {
 }
 
 // ─── History ──────────────────────────────────────────────────────────────────
-function HistoryScreen({ games, onUpdateGames, onBack }) {
+function HistoryScreen({ myGames, onUpdateGame, onBack }) {
   const [search, setSearch] = useState("");
   const [fMode, setFMode]   = useState("all");
   const [editGame, setEditGame] = useState(null);
 
-  const filtered = games.filter(g => {
+  const filtered = myGames.filter(g => {
     if (fMode!=="all" && g.mode!==fMode) return false;
     if (search) {
       const q = search.toLowerCase();
@@ -1097,20 +1169,19 @@ function HistoryScreen({ games, onUpdateGames, onBack }) {
              (g.playlist||"").toLowerCase().includes(q);
     }
     return true;
-  }).sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
+  });
 
-  function saveEdit(updated) {
-    const idx = games.findIndex(g=>g.id===updated.id);
-    if (idx===-1) return;
-    const ng = [...games]; ng[idx]=updated;
-    onUpdateGames(ng); setEditGame(null);
+  async function saveEdit(updated) {
+    await db.saveGame(updated);
+    onUpdateGame(updated);
+    setEditGame(null);
   }
 
   return (
     <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
         <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
-        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Game History</h2>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>My History</h2>
       </div>
 
       <TInput value={search} onChange={setSearch} placeholder="Search by player or playlist…" style={{ marginBottom:10 }} />
@@ -1164,7 +1235,7 @@ function GameEditForm({ game, onChange, onSave, onCancel }) {
       <Lbl>Playlist</Lbl>
       <TInput value={game.playlist||""} onChange={v=>onChange({...game,playlist:v})} placeholder="Playlist name" style={{ marginBottom:10 }} />
       <Lbl>Playlist URL (optional)</Lbl>
-      <TInput value={game.playlistUrl||""} onChange={v=>onChange({...game,playlistUrl:v||null})} placeholder="Spotify, YouTube, Apple Music, etc." style={{ marginBottom:14 }} />
+      <TInput value={game.playlistUrl||""} onChange={v=>onChange({...game,playlistUrl:v||null})} placeholder="Spotify, YouTube, Apple Music…" style={{ marginBottom:14 }} />
       {game.playlistUrl && <div style={{ marginBottom:14 }}><PlaylistLink url={game.playlistUrl} /></div>}
       <Lbl>Player Names</Lbl>
       {game.players.map((p,i) => (
@@ -1199,21 +1270,28 @@ function GameEditForm({ game, onChange, onSave, onCancel }) {
 }
 
 // ─── Playlists Manager ────────────────────────────────────────────────────────
-function PlaylistScreen({ playlists, onUpdate, onBack }) {
-  const [name, setName]       = useState("");
-  const [url, setUrl]         = useState("");
-  const [editPl, setEditPl]   = useState(null); // {id, name, url}
+function PlaylistScreen({ playlists, onBack }) {
+  const [name, setName]     = useState("");
+  const [url, setUrl]       = useState("");
+  const [editPl, setEditPl] = useState(null);
+  const [saving, setSaving] = useState(false);
 
-  function add() {
+  async function add() {
     if (!name.trim() || playlists.find(p=>p.name===name.trim())) return;
-    onUpdate([...playlists, { id:uid(), name:name.trim(), url:url.trim()||null }]);
-    setName(""); setUrl("");
+    setSaving(true);
+    await db.savePlaylist({ id:uid(), name:name.trim(), url:url.trim()||null });
+    setName(""); setUrl(""); setSaving(false);
   }
 
-  function saveEdit() {
+  async function saveEdit() {
     if (!editPl) return;
-    onUpdate(playlists.map(p => p.id===editPl.id ? { ...p, name:editPl.name.trim(), url:editPl.url?.trim()||null } : p));
-    setEditPl(null);
+    setSaving(true);
+    await db.savePlaylist({ ...editPl, name:editPl.name.trim(), url:editPl.url?.trim()||null });
+    setEditPl(null); setSaving(false);
+  }
+
+  async function remove(id) {
+    await db.deletePlaylist(id);
   }
 
   return (
@@ -1223,12 +1301,13 @@ function PlaylistScreen({ playlists, onUpdate, onBack }) {
         <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Playlists</h2>
       </div>
 
-      {/* Add new */}
       <Card style={{ marginBottom:14 }}>
         <Lbl>Add Playlist</Lbl>
         <TInput value={name} onChange={setName} placeholder="Playlist name" style={{ marginBottom:8 }} />
         <TInput value={url} onChange={setUrl} placeholder="URL (optional — Spotify, YouTube, etc.)" style={{ marginBottom:10 }} />
-        <Btn onClick={add} disabled={!name.trim()} style={{ width:"100%" }}>Add Playlist</Btn>
+        <Btn onClick={add} disabled={!name.trim() || saving} style={{ width:"100%" }}>
+          {saving ? "Saving…" : "Add Playlist"}
+        </Btn>
       </Card>
 
       {playlists.length===0
@@ -1242,7 +1321,7 @@ function PlaylistScreen({ playlists, onUpdate, onBack }) {
               </div>
               <div style={{ display:"flex", gap:6, flexShrink:0 }}>
                 <Btn variant="ghost" small onClick={() => setEditPl({...pl, url:pl.url||""})}>Edit</Btn>
-                <Btn variant="danger" small onClick={() => onUpdate(playlists.filter(p=>p.id!==pl.id))}>Remove</Btn>
+                <Btn variant="danger" small onClick={() => remove(pl.id)}>Remove</Btn>
               </div>
             </div>
           </Card>
@@ -1255,11 +1334,13 @@ function PlaylistScreen({ playlists, onUpdate, onBack }) {
             <Lbl>Name</Lbl>
             <TInput value={editPl.name} onChange={v=>setEditPl({...editPl,name:v})} placeholder="Playlist name" style={{ marginBottom:12 }} />
             <Lbl>URL (optional)</Lbl>
-            <TInput value={editPl.url||""} onChange={v=>setEditPl({...editPl,url:v})} placeholder="Spotify, YouTube, Apple Music, etc." style={{ marginBottom:16 }} />
+            <TInput value={editPl.url||""} onChange={v=>setEditPl({...editPl,url:v})} placeholder="Spotify, YouTube, Apple Music…" style={{ marginBottom:16 }} />
             {editPl.url && <div style={{ marginBottom:14 }}><PlaylistLink url={editPl.url} /></div>}
             <div style={{ display:"flex", gap:10 }}>
               <Btn variant="ghost" onClick={() => setEditPl(null)} style={{ flex:1 }}>Cancel</Btn>
-              <Btn variant="primary" onClick={saveEdit} disabled={!editPl.name.trim()} style={{ flex:1 }}>Save</Btn>
+              <Btn variant="primary" onClick={saveEdit} disabled={!editPl.name.trim() || saving} style={{ flex:1 }}>
+                {saving ? "Saving…" : "Save"}
+              </Btn>
             </div>
           </div>
         )}
@@ -1268,90 +1349,76 @@ function PlaylistScreen({ playlists, onUpdate, onBack }) {
   );
 }
 
-// ─── Data Screen (export / import / share) ───────────────────────────────────
-function DataScreen({ games, playlists, onImport, onBack }) {
-  const [importText, setImportText] = useState("");
-  const [importMode, setImportMode] = useState("merge"); // merge | replace
-  const [status, setStatus]         = useState(null);   // { ok, msg }
-  const [tab, setTab]               = useState("backup"); // backup | share
-  const fileRef = useRef(null);
+// ─── Share Data Screen ────────────────────────────────────────────────────────
+function ShareScreen({ myGames, playlists, onBack }) {
+  const [shareCode, setShareCode]   = useState(null);
+  const [importCode, setImportCode] = useState("");
+  const [loading, setLoading]       = useState(false);
+  const [status, setStatus]         = useState(null);
 
-  // ── Export ──────────────────────────────────────────────────────────────────
-  function doExport() {
-    const payload = {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      games,
-      playlists,
-    };
-    const json = JSON.stringify(payload, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `song-game-backup-${new Date().toISOString().slice(0,10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus({ ok:true, msg:`Exported ${games.length} game${games.length!==1?"s":""} and ${playlists.length} playlist${playlists.length!==1?"s":""}.` });
+  function genCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
   }
 
-  // ── Import from file picker ──────────────────────────────────────────────────
-  function onFileChange(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => setImportText(ev.target.result);
-    reader.readAsText(file);
-    e.target.value = "";
-  }
-
-  // ── Parse & apply import ────────────────────────────────────────────────────
-  function doImport() {
-    let parsed;
+  async function doShare() {
+    setLoading(true); setShareCode(null); setStatus(null);
+    const code = genCode();
     try {
-      parsed = JSON.parse(importText.trim());
-    } catch {
-      setStatus({ ok:false, msg:"Invalid JSON — couldn't parse the file." });
-      return;
+      await db.saveShare(code, {
+        version: 1,
+        sharedAt: Date.now(),
+        expiresAt: Date.now() + 48 * 60 * 60 * 1000,
+        games: myGames,
+        playlists,
+      });
+      setShareCode(code);
+      setStatus({ ok:true, msg:`Code expires in 48 hours.` });
+    } catch (e) {
+      setStatus({ ok:false, msg:`Share failed: ${e.message}` });
+    } finally {
+      setLoading(false);
     }
-    if (!Array.isArray(parsed.games) || !Array.isArray(parsed.playlists)) {
-      setStatus({ ok:false, msg:"File doesn't look like a Song Game backup (missing games or playlists arrays)." });
-      return;
-    }
+  }
 
-    let newGames, newPlaylists;
-    if (importMode === "replace") {
-      newGames     = parsed.games;
-      newPlaylists = parsed.playlists;
-    } else {
-      const existingGameIds = new Set(games.map(g=>g.id));
-      const existingPlIds   = new Set(playlists.map(p=>p.id));
-      const addedGames = parsed.games.filter(g => !existingGameIds.has(g.id));
-      const addedPl    = parsed.playlists.filter(p => !existingPlIds.has(p.id));
-      newGames     = [...games, ...addedGames];
-      newPlaylists = [...playlists, ...addedPl];
-      setStatus({ ok:true, msg:`Merged: added ${addedGames.length} new game${addedGames.length!==1?"s":""} and ${addedPl.length} new playlist${addedPl.length!==1?"s":""}.` });
-    }
+  async function doImport() {
+    const code = importCode.trim().toUpperCase();
+    if (code.length !== 6) { setStatus({ ok:false, msg:"Enter a 6-character code." }); return; }
+    setLoading(true); setStatus(null);
+    try {
+      const data = await db.getShare(code);
+      if (!data) { setStatus({ ok:false, msg:"Code not found — it may have expired or been mistyped." }); setLoading(false); return; }
+      if (data.expiresAt && Date.now() > data.expiresAt) { setStatus({ ok:false, msg:"This code has expired." }); setLoading(false); return; }
+      if (!Array.isArray(data.games)) { setStatus({ ok:false, msg:"Share data looks corrupted." }); setLoading(false); return; }
 
-    onImport(newGames, newPlaylists);
-    setImportText("");
-    if (importMode === "replace") {
-      setStatus({ ok:true, msg:`Replaced with ${newGames.length} game${newGames.length!==1?"s":""} and ${newPlaylists.length} playlist${newPlaylists.length!==1?"s":""}.` });
+      // Merge games into Firebase (each under its own ID — won't overwrite existing)
+      const existingIds = new Set(myGames.map(g=>g.id));
+      const newGames = (data.games||[]).filter(g => !existingIds.has(g.id));
+      await Promise.all(newGames.map(g => db.saveGame(g)));
+
+      // Merge playlists
+      const existingPlIds = new Set(playlists.map(p=>p.id));
+      const newPls = (data.playlists||[]).filter(p => !existingPlIds.has(p.id));
+      await Promise.all(newPls.map(p => db.savePlaylist(p)));
+
+      setImportCode("");
+      setStatus({ ok:true, msg:`Merged ${newGames.length} new game${newGames.length!==1?"s":""} and ${newPls.length} new playlist${newPls.length!==1?"s":""}.` });
+    } catch (e) {
+      setStatus({ ok:false, msg:`Import failed: ${e.message}` });
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
     <div style={{ padding:16, maxWidth:460, margin:"0 auto", paddingBottom:40 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:16 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20 }}>
         <Btn variant="ghost" small onClick={onBack}>← Back</Btn>
-        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Data & Backup</h2>
+        <h2 style={{ color:T.text, fontWeight:800, fontSize:20 }}>Share Data</h2>
       </div>
 
-      <Tabs tabs={[{label:"💾 Backup",value:"backup"},{label:"🔗 Share Data",value:"share"}]}
-        active={tab} onChange={setTab} />
-      <div style={{ marginBottom:14 }} />
-
-      {/* Status banner */}
       {status && (
         <div style={{ background: status.ok ? "#14532D" : "#7F1D1D",
           border: `1px solid ${status.ok ? "#166534" : "#991B1B"}`,
@@ -1364,181 +1431,15 @@ function DataScreen({ games, playlists, onImport, onBack }) {
         </div>
       )}
 
-      {tab === "backup" && <>
-        {/* Export */}
-        <Card style={{ marginBottom:14 }}>
-          <Lbl>Export</Lbl>
-          <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-            Downloads a <code style={{ color:T.accent, fontSize:12 }}>.json</code> backup file containing all your games and playlists. Keep this somewhere safe.
-          </p>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-            background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:8 }}>
-            <span style={{ color:T.muted, fontSize:13 }}>Games saved</span>
-            <span style={{ color:T.text, fontWeight:700 }}>{games.length}</span>
-          </div>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-            background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
-            <span style={{ color:T.muted, fontSize:13 }}>Playlists saved</span>
-            <span style={{ color:T.text, fontWeight:700 }}>{playlists.length}</span>
-          </div>
-          <Btn onClick={doExport} style={{ width:"100%" }}>⬇ Download Backup</Btn>
-        </Card>
-
-        {/* Import */}
-        <Card>
-          <Lbl>Import</Lbl>
-          <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-            Load a previously exported backup file. Choose whether to merge with existing data or replace it entirely.
-          </p>
-          <div style={{ display:"flex", gap:6, marginBottom:14 }}>
-            {[["merge","Merge"],["replace","Replace all"]].map(([v,l]) => (
-              <button key={v} onClick={() => setImportMode(v)}
-                style={{ flex:1, padding:"8px", borderRadius:8, cursor:"pointer", fontSize:13, fontWeight:600,
-                  border:`1px solid ${importMode===v ? T.accent : T.border}`,
-                  background: importMode===v ? `${T.accent}22` : T.surface,
-                  color: importMode===v ? T.accent : T.muted }}>
-                {l}
-              </button>
-            ))}
-          </div>
-          <p style={{ color:T.muted, fontSize:12, marginBottom:14, lineHeight:1.4 }}>
-            {importMode==="merge"
-              ? "Adds new games and playlists from the file. Anything already in your data (matched by ID) is left untouched."
-              : "⚠️ Overwrites all current data with the file contents. Your existing games and playlists will be lost."}
-          </p>
-          <input ref={fileRef} type="file" accept=".json,application/json" onChange={onFileChange}
-            style={{ display:"none" }} />
-          <Btn variant="secondary" onClick={() => fileRef.current.click()} style={{ width:"100%", marginBottom:10 }}>
-            📂 Choose File…
-          </Btn>
-          {importText ? (
-            <div style={{ background:T.surface, borderRadius:8, padding:"10px 12px", marginBottom:10,
-              display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <span style={{ color:T.green, fontSize:13 }}>✓ File loaded ({(importText.length/1024).toFixed(1)} KB)</span>
-              <button onClick={() => setImportText("")} style={{ background:"none", color:T.muted, fontSize:14 }}>✕</button>
-            </div>
-          ) : (
-            <details style={{ marginBottom:10 }}>
-              <summary style={{ color:T.muted, fontSize:12, cursor:"pointer", userSelect:"none" }}>Or paste JSON manually</summary>
-              <textarea value={importText} onChange={e=>setImportText(e.target.value)}
-                placeholder='{"version":1,"games":[...],"playlists":[]}'
-                style={{ width:"100%", marginTop:8, background:T.surface, border:`1px solid ${T.border}`,
-                  borderRadius:8, padding:"10px 12px", color:T.text, fontSize:12,
-                  resize:"vertical", minHeight:80, outline:"none", fontFamily:"monospace" }} />
-            </details>
-          )}
-          <Btn onClick={doImport} disabled={!importText.trim()} variant={importMode==="replace" ? "danger" : "primary"}
-            style={{ width:"100%" }}>
-            {importMode==="replace" ? "⚠️ Replace & Import" : "⬆ Merge & Import"}
-          </Btn>
-        </Card>
-      </>}
-
-      {tab === "share" && (
-        <FirebaseSharePanel games={games} playlists={playlists} onImport={onImport} onStatus={setStatus} />
-      )}
-    </div>
-  );
-}
-
-// ─── Firebase Share Panel ─────────────────────────────────────────────────────
-function FirebaseSharePanel({ games, playlists, onImport, onStatus }) {
-  const [shareCode, setShareCode]   = useState(null);
-  const [importCode, setImportCode] = useState("");
-  const [loading, setLoading]       = useState(false);
-  const fbConfigOk = FB.dbUrl && !FB.dbUrl.includes("YOUR-PROJECT");
-
-  function genCode() {
-    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let code = "";
-    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-    return code;
-  }
-
-  async function doShare() {
-    if (!fbConfigOk) { onStatus({ ok:false, msg:"Firebase not configured yet — see setup instructions below." }); return; }
-    setLoading(true); setShareCode(null);
-    const code = genCode();
-    const payload = {
-      version: 1,
-      sharedAt: Date.now(),
-      expiresAt: Date.now() + 48 * 60 * 60 * 1000,
-      games,
-      playlists,
-    };
-    try {
-      const res = await fetch(`${FB.dbUrl}/shares/${code}.json`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`Firebase error ${res.status} — check your DB rules allow writes to /shares`);
-      setShareCode(code);
-      onStatus({ ok:true, msg:`Data shared! Code: ${code} (expires in 48 hours)` });
-    } catch (err) {
-      onStatus({ ok:false, msg:`Share failed: ${err.message}` });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function doImportCode() {
-    const code = importCode.trim().toUpperCase();
-    if (code.length !== 6) { onStatus({ ok:false, msg:"Enter a 6-character share code." }); return; }
-    if (!fbConfigOk) { onStatus({ ok:false, msg:"Firebase not configured yet — see setup instructions below." }); return; }
-    setLoading(true);
-    try {
-      const res = await fetch(`${FB.dbUrl}/shares/${code}.json`);
-      if (!res.ok) throw new Error(`Firebase error ${res.status}`);
-      const data = await res.json();
-      if (!data) { onStatus({ ok:false, msg:"Code not found. It may have expired or been mistyped." }); setLoading(false); return; }
-      if (data.expiresAt && Date.now() > data.expiresAt) {
-        onStatus({ ok:false, msg:"This share code has expired (48-hour limit)." }); setLoading(false); return;
-      }
-      if (!Array.isArray(data.games) || !Array.isArray(data.playlists)) {
-        onStatus({ ok:false, msg:"Share data looks corrupted. Ask the sender to try again." }); setLoading(false); return;
-      }
-      const existingGameIds = new Set(games.map(g=>g.id));
-      const existingPlIds   = new Set(playlists.map(p=>p.id));
-      const addedGames = data.games.filter(g => !existingGameIds.has(g.id));
-      const addedPl    = data.playlists.filter(p => !existingPlIds.has(p.id));
-      onImport([...games, ...addedGames], [...playlists, ...addedPl]);
-      setImportCode("");
-      onStatus({ ok:true, msg:`Merged ${addedGames.length} new game${addedGames.length!==1?"s":""} and ${addedPl.length} new playlist${addedPl.length!==1?"s":""} from code ${code}.` });
-    } catch (err) {
-      onStatus({ ok:false, msg:`Import failed: ${err.message}` });
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div>
-      {!fbConfigOk && (
-        <Card style={{ marginBottom:14, borderColor:"#92400E", background:"#1c1409" }}>
-          <div style={{ color:T.accent, fontWeight:700, fontSize:14, marginBottom:8 }}>⚙️ Firebase Setup Required</div>
-          <p style={{ color:T.muted, fontSize:13, lineHeight:1.6, marginBottom:10 }}>
-            Sharing uses a free Firebase Realtime Database. One-time setup:
-          </p>
-          <div style={{ color:T.muted, fontSize:13, lineHeight:2 }}>
-            1. Go to <a href="https://console.firebase.google.com" target="_blank" rel="noopener noreferrer" style={{ color:T.blue }}>console.firebase.google.com</a><br/>
-            2. Create a project → Build → Realtime Database → Create database (test mode)<br/>
-            3. Copy your database URL (e.g. <code style={{ color:T.accent, fontSize:12 }}>https://my-app-default-rtdb.firebaseio.com</code>)<br/>
-            4. Open this HTML file and replace <code style={{ color:T.accent, fontSize:12 }}>YOUR-PROJECT-ID</code> in the <code style={{ color:T.accent, fontSize:12 }}>FB.dbUrl</code> near the top of the script<br/>
-            5. In Firebase Console → Realtime Database → Rules, set <code style={{ color:T.accent, fontSize:12 }}>/shares</code> to allow read/write
-          </div>
-        </Card>
-      )}
-
       <Card style={{ marginBottom:14 }}>
         <Lbl>Share your data</Lbl>
         <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Uploads your game history to Firebase and generates a 6-character code. Give the code to another player — they enter it below to merge your data into their app. Expires after 48 hours.
+          Generates a 6-character code. Give it to another player so they can merge your game history into their app. Expires after 48 hours.
         </p>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
           background:T.surface, borderRadius:8, padding:"10px 14px", marginBottom:14 }}>
-          <span style={{ color:T.muted, fontSize:13 }}>Games to share</span>
-          <span style={{ color:T.text, fontWeight:700 }}>{games.length}</span>
+          <span style={{ color:T.muted, fontSize:13 }}>Your games</span>
+          <span style={{ color:T.text, fontWeight:700 }}>{myGames.length}</span>
         </div>
         {shareCode && (
           <div style={{ background:"#0d1f2d", border:`2px solid ${T.blue}`, borderRadius:12,
@@ -1547,18 +1448,17 @@ function FirebaseSharePanel({ games, playlists, onImport, onStatus }) {
             <div style={{ color:T.blue, fontSize:36, fontWeight:900, letterSpacing:"0.18em", fontFamily:"monospace" }}>
               {shareCode}
             </div>
-            <div style={{ color:T.muted, fontSize:12, marginTop:6 }}>Tell the other player to enter this code</div>
           </div>
         )}
-        <Btn onClick={doShare} disabled={loading || !games.length} style={{ width:"100%" }}>
-          {loading ? "Uploading…" : shareCode ? "📤 Share Again (New Code)" : "📤 Share Data"}
+        <Btn onClick={doShare} disabled={loading || !myGames.length} style={{ width:"100%" }}>
+          {loading ? "Uploading…" : shareCode ? "📤 Share Again (New Code)" : "📤 Generate Share Code"}
         </Btn>
       </Card>
 
       <Card>
         <Lbl>Import from code</Lbl>
         <p style={{ color:T.muted, fontSize:13, marginBottom:14, lineHeight:1.5 }}>
-          Enter a 6-character code from another player to merge their history into your app. Your existing data is kept — only new entries are added.
+          Enter a code from another player to merge their history into your app.
         </p>
         <TInput
           value={importCode}
@@ -1566,7 +1466,7 @@ function FirebaseSharePanel({ games, playlists, onImport, onStatus }) {
           placeholder="Enter code (e.g. AB3X7K)"
           style={{ marginBottom:12, fontSize:18, fontFamily:"monospace", textAlign:"center", letterSpacing:"0.15em" }}
         />
-        <Btn onClick={doImportCode} disabled={loading || importCode.trim().length !== 6} style={{ width:"100%" }}>
+        <Btn onClick={doImport} disabled={loading || importCode.trim().length !== 6} style={{ width:"100%" }}>
           {loading ? "Importing…" : "⬆ Import from Code"}
         </Btn>
       </Card>
@@ -1574,54 +1474,167 @@ function FirebaseSharePanel({ games, playlists, onImport, onStatus }) {
   );
 }
 
+// ─── Top Bar ─────────────────────────────────────────────────────────────────
+function TopBar({ user, onOpenAccount }) {
+  return (
+    <div style={{ position:"sticky", top:0, zIndex:100, background:T.bg,
+      borderBottom:`1px solid ${T.border}`, padding:"8px 16px",
+      display:"flex", justifyContent:"flex-end", alignItems:"center" }}>
+      <button onClick={onOpenAccount}
+        style={{ background:"none", border:"none", cursor:"pointer", display:"flex", alignItems:"center", gap:8 }}>
+        {user.photoURL
+          ? <img src={user.photoURL} style={{ width:28, height:28, borderRadius:"50%" }} alt="" />
+          : <div style={{ width:28, height:28, borderRadius:"50%", background:T.accent,
+              display:"flex", alignItems:"center", justifyContent:"center",
+              color:"#0E1117", fontWeight:800, fontSize:13 }}>
+              {user.displayName?.[0]?.toUpperCase()}
+            </div>
+        }
+      </button>
+    </div>
+  );
+}
+
+// ─── Account Screen (sign out tucked here) ────────────────────────────────────
+function AccountModal({ open, onClose, user }) {
+  function signOut() {
+    fbAuth.signOut();
+    onClose();
+  }
+  return (
+    <Modal open={open} onClose={onClose} title="Account">
+      <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:20 }}>
+        {user.photoURL
+          ? <img src={user.photoURL} style={{ width:48, height:48, borderRadius:"50%" }} alt="" />
+          : <div style={{ width:48, height:48, borderRadius:"50%", background:T.accent, display:"flex", alignItems:"center", justifyContent:"center", color:"#0E1117", fontWeight:800, fontSize:20 }}>
+              {user.displayName?.[0]?.toUpperCase()}
+            </div>
+        }
+        <div>
+          <div style={{ color:T.text, fontWeight:700, fontSize:16 }}>{user.displayName}</div>
+          <div style={{ color:T.muted, fontSize:13 }}>{user.email}</div>
+        </div>
+      </div>
+      <Btn variant="danger" onClick={signOut} style={{ width:"100%" }}>Sign Out</Btn>
+    </Modal>
+  );
+}
+
 // ─── App root ─────────────────────────────────────────────────────────────────
 function App() {
+  const [authState, setAuthState]     = useState("loading"); // loading | signed-out | profile-setup | ready
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [appUser, setAppUser]         = useState(null);   // { uid, displayName, email, photoURL }
+  const [myGames, setMyGames]         = useState([]);
+  const [allGames, setAllGames]       = useState([]);
+  const [playlists, setPlaylists]     = useState([]);
   const [screen, setScreen]           = useState("home");
-  const [games, setGames]             = useState(() => loadData(KEYS.games));
-  const [playlists, setPlaylists]     = useState(() => loadData(KEYS.playlists));
   const [currentGame, setCurrentGame] = useState(null);
+  const [lastGame, setLastGame]       = useState(null);
+  const [showAccount, setShowAccount] = useState(false);
 
-  function updateGames(ng)  { setGames(ng);   saveData(KEYS.games, ng); }
-  function updatePl(np)     { setPlaylists(np); saveData(KEYS.playlists, np); }
+  // ── Auth listener ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    const unsub = fbAuth.onAuthStateChanged(async (fbUser) => {
+      if (!fbUser) {
+        setAuthState("signed-out");
+        setFirebaseUser(null);
+        setAppUser(null);
+        return;
+      }
+      setFirebaseUser(fbUser);
+      // Check if user profile exists in DB
+      const profile = await db.getUser(fbUser.uid);
+      if (!profile || !profile.displayName) {
+        // First time — show profile setup with Google name pre-filled
+        setAppUser({ uid:fbUser.uid, displayName:fbUser.displayName||"", email:fbUser.email, photoURL:fbUser.photoURL });
+        setAuthState("profile-setup");
+      } else {
+        setAppUser({ uid:fbUser.uid, ...profile });
+        setAuthState("ready");
+      }
+    });
+    return unsub;
+  }, []);
 
-  function importData(newGames, newPlaylists) {
-    updateGames(newGames);
-    updatePl(newPlaylists);
+  // ── Data listeners (only when ready) ──────────────────────────────────────
+  useEffect(() => {
+    if (authState !== "ready" || !appUser) return;
+    const unsubMine = db.listenMyGames(appUser.uid, setMyGames);
+    const unsubAll  = db.listenAllGames(setAllGames);
+    const unsubPl   = db.listenPlaylists(setPlaylists);
+    return () => { unsubMine(); unsubAll(); unsubPl(); };
+  }, [authState, appUser?.uid]);
+
+  async function handleProfileSave(displayName) {
+    const profile = { displayName, email:firebaseUser.email, photoURL:firebaseUser.photoURL||null };
+    await db.setUser(firebaseUser.uid, profile);
+    setAppUser({ uid:firebaseUser.uid, ...profile });
+    setAuthState("ready");
   }
 
   function startGame(config) {
     const game = {
       id:uid(), startedAt:Date.now(), status:"active",
+      ownerUid: appUser.uid, ownerName: appUser.displayName,
       mode:config.mode, players:config.players, albumEnabled:config.albumEnabled,
-      playlist:config.playlist, playlistUrl:config.playlistUrl||null, songs:[], elapsedSeconds:0,
+      playlist:config.playlist, playlistUrl:config.playlistUrl||null,
+      songs:[], elapsedSeconds:0,
     };
     setCurrentGame(game);
     setScreen("game");
   }
 
-  function endGame(finalGame) {
-    const ng = [finalGame, ...games];
-    updateGames(ng);
+  function handleEndGame(finalGame) {
     setCurrentGame(null);
+    setLastGame(finalGame);
     setScreen("summary_" + finalGame.id);
   }
 
   const summaryId = screen.startsWith("summary_") ? screen.slice("summary_".length) : null;
 
-  if (screen==="home")        return <HomeScreen onNav={setScreen} games={games} />;
-  if (screen==="setup")       return <SetupScreen playlists={playlists} onStart={startGame} onBack={() => setScreen("home")} />;
-  if (screen==="game" && currentGame)
-    return <GameScreen game={currentGame} onUpdateGame={setCurrentGame} onEndGame={endGame}
-              playlists={playlists} onSavePlaylists={updatePl} />;
-  if (summaryId) {
-    const g = games.find(g=>g.id===summaryId);
-    if (g) return <SummaryScreen game={g} onHome={() => setScreen("home")} />;
+  // ── Render ─────────────────────────────────────────────────────────────────
+  if (authState === "loading") {
+    return (
+      <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:T.bg }}>
+        <div style={{ textAlign:"center" }}>
+          <div style={{ fontSize:48, marginBottom:16 }}>🎶</div>
+          <Spinner size={28} />
+        </div>
+      </div>
+    );
   }
-  if (screen==="scoreboard")  return <ScoreboardScreen games={games} playlists={playlists} onBack={() => setScreen("home")} />;
-  if (screen==="history")     return <HistoryScreen games={games} onUpdateGames={updateGames} onBack={() => setScreen("home")} />;
-  if (screen==="playlists")   return <PlaylistScreen playlists={playlists} onUpdate={updatePl} onBack={() => setScreen("home")} />;
-  if (screen==="data")        return <DataScreen games={games} playlists={playlists} onImport={importData} onBack={() => setScreen("home")} />;
-  return <HomeScreen onNav={setScreen} games={games} />;
+
+  if (authState === "signed-out") return <AuthScreen onSignedIn={() => {}} />;
+  if (authState === "profile-setup") return <ProfileSetupScreen googleName={appUser?.displayName} onSave={handleProfileSave} />;
+
+  return (
+    <div style={{ minHeight:"100vh", background:T.bg }}>
+      {screen !== "game" && <TopBar user={appUser} onOpenAccount={() => setShowAccount(true)} />}
+      <AccountModal open={showAccount} onClose={() => setShowAccount(false)} user={appUser} />
+
+      {screen==="home" && <HomeScreen onNav={setScreen} myGames={myGames} user={appUser} />}
+      {screen==="setup" && <SetupScreen playlists={playlists} onStart={startGame} onBack={() => setScreen("home")} user={appUser} />}
+      {screen==="game" && currentGame && (
+        <GameScreen game={currentGame} onUpdateGame={setCurrentGame} onEndGame={handleEndGame}
+          playlists={playlists} />
+      )}
+      {summaryId && (() => {
+        // Use lastGame first (avoids race with Firebase listener after endGame),
+        // then fall back to myGames/allGames for viewing historical summaries
+        const g = (lastGame?.id === summaryId ? lastGame : null)
+               || myGames.find(g=>g.id===summaryId)
+               || allGames.find(g=>g.id===summaryId);
+        return g ? <SummaryScreen game={g} onHome={() => setScreen("home")} /> : null;
+      })()}
+      {screen==="scoreboard" && <ScoreboardScreen allGames={allGames} playlists={playlists} onBack={() => setScreen("home")} />}
+      {screen==="history"    && <HistoryScreen myGames={myGames} onUpdateGame={g => {
+          setMyGames(prev => prev.map(x=>x.id===g.id?g:x));
+        }} onBack={() => setScreen("home")} />}
+      {screen==="playlists"  && <PlaylistScreen playlists={playlists} onBack={() => setScreen("home")} />}
+      {screen==="share"      && <ShareScreen myGames={myGames} playlists={playlists} onBack={() => setScreen("home")} />}
+    </div>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
