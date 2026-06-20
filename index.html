@@ -96,12 +96,8 @@ const db = {
     // Firebase rejects objects with null values — strip url if not set
     const data = { id:pl.id, name:pl.name };
     if (pl.url) data.url = pl.url;
-    // Use the playlist's id as the key so edits overwrite correctly,
-    // but new playlists get their id from Firebase push() — see PlaylistScreen
     return fbDb.ref(`playlists/${pl.id}`).set(data);
   },
-  // Generate a guaranteed-unique playlist ID via Firebase push()
-  newPlaylistId: () => fbDb.ref('playlists').push().key,
   deletePlaylist: (id) => fbDb.ref(`playlists/${id}`).remove(),
 
   // Shares
@@ -113,7 +109,9 @@ const db = {
 const { useState, useEffect, useRef } = React;
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
-function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
 function fmtTime(s) {
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
   return h > 0
@@ -1299,8 +1297,7 @@ function PlaylistScreen({ playlists, onBack }) {
     if (!name.trim() || playlists.find(p=>p.name===name.trim())) return;
     setSaving(true);
     try {
-      const id = db.newPlaylistId();
-      await db.savePlaylist({ id, name:name.trim(), url:url.trim()||null });
+      await db.savePlaylist({ id:uid(), name:name.trim(), url:url.trim()||null });
       setName(""); setUrl("");
     } finally {
       setSaving(false);
