@@ -291,16 +291,22 @@ function computeScores(players, songs, mode) {
   players.forEach(p => {
     stats[p.id] = { id:p.id, name:p.name, correct:0, incorrect:0, title:[0,0], artist:[0,0], album:[0,0] };
   });
+  const hostId = players[0]?.id;
   (songs||[]).filter(s => !s.skipped).forEach(song => {
     ["title","artist","album"].forEach(cat => {
       const r = song[cat];
       if (!r) return;
       if (r.type === "null") {
-        const penalty = (r.reason === "said_in_song") ? 0.5 : 0;
-        if (penalty > 0 && r.incorrects) {
-          Object.entries(r.incorrects).forEach(([pid,v]) => {
-            if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v) * penalty;
-          });
+        // "Said in song" = 0.5 wrong; "N/A" (no_category) = not counted at all
+        if (r.reason === "said_in_song") {
+          if (mode === "solo" && stats[hostId]) {
+            // Host always charged 0.5 for said-in-song
+            stats[hostId].incorrect += 0.5;
+          } else if (r.incorrects) {
+            Object.entries(r.incorrects).forEach(([pid,v]) => {
+              if (stats[pid] && v < 0) stats[pid].incorrect += Math.abs(v) * 0.5;
+            });
+          }
         }
         return;
       }
@@ -340,6 +346,7 @@ function buildPlayerMap(filteredGames) {
       const playerObj = g.players.find(p=>p.id===s.id);
       const key = playerObj ? playerKey(playerObj) : s.name;
       if (!pm[key]) pm[key] = {
+        key,
         name: s.name,
         accountUid: playerObj?.accountUid||null,
         correct: 0, incorrect: 0,
@@ -358,6 +365,7 @@ function buildPlayerMap(filteredGames) {
         minutes: gameMinutes,
         songs: songs.length,
         ppm: gameMinutes > 0 ? s.correct / gameMinutes : 0,
+        pps: songs.length > 0 ? s.correct / songs.length : 0,
         ratio: s.incorrect > 0 ? s.correct / s.incorrect : s.correct > 0 ? Infinity : 0,
       });
     });
@@ -389,8 +397,13 @@ function buildPlayerMap(filteredGames) {
     p.avgCorrect   = gc > 0 ? p.correct / gc : 0;
     p.avgIncorrect = gc > 0 ? p.incorrect / gc : 0;
     p.avgPpm       = gc > 0 ? p.games.reduce((a,g)=>a+g.ppm,0) / gc : 0;
+    p.avgPps       = gc > 0 ? p.games.reduce((a,g)=>a+g.pps,0) / gc : 0;
     p.avgRatio     = gc > 0 ? p.games.filter(g=>isFinite(g.ratio)).reduce((a,g,_,arr)=>a+g.ratio/arr.length,0) : 0;
     p.gameCount    = gc;
+    // Overall (all-time) derived metrics
+    p.overallPpm   = p.minutesPlayed > 0 ? p.correct / p.minutesPlayed : 0;
+    p.overallPps   = p.songsPlayed   > 0 ? p.correct / p.songsPlayed   : 0;
+    p.overallRatio = p.incorrect > 0 ? p.correct / p.incorrect : p.correct > 0 ? Infinity : 0;
   });
 
   return pm;
@@ -800,6 +813,12 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
     if (s.result?.type==="said_in_song") return { type:"null", reason:"said_in_song", incorrects };
     if (s.result?.type==="no_category")  return { type:"null", reason:"no_category" };
     if (s.result?.type==="player")       return { type:"player", playerId:s.result.playerId, incorrects };
+    // Unmarked in solo mode = the player got it wrong by default.
+    // Ensure the host player has at least one wrong recorded for this category.
+    if (game.mode === "solo") {
+      const hostId = game.players[0].id;
+      if (!incorrects[hostId]) incorrects[hostId] = -1;
+    }
     return { type:"none", incorrects };
   }
 
@@ -1136,7 +1155,6 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
   const [fMode, setFMode]       = useState("all");
   const [fPl, setFPl]           = useState("all");
   const [detailP, setDetailP]   = useState(null);
-  const [statsP, setStatsP]     = useState(null);
   const [detailPl, setDetailPl] = useState(null);
 
   const allPl    = [...new Set(allGames.filter(g=>g.playlist).map(g=>g.playlist))];
@@ -1182,7 +1200,7 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
       )}
 
       <Tabs tabs={[{label:"Rankings",value:"rankings"},{label:"Players",value:"stats"},{label:"Playlists",value:"playlists"}]}
-        active={tab} onChange={v => { setTab(v); setDetailP(null); setStatsP(null); setDetailPl(null); }} />
+        active={tab} onChange={v => { setTab(v); setDetailP(null); setDetailPl(null); }} />
       <div style={{ marginBottom:14 }} />
 
       {tab==="rankings" && <>
@@ -1224,104 +1242,185 @@ function ScoreboardScreen({ allGames, playlists, onBack }) {
             const mainVal = showAvg
               ? r.avgCorrect.toFixed(1)
               : (r.bestGame ? r.bestGame.correct : "—");
-            const subVal = showAvg
-              ? `${r.avgPpm.toFixed(1)}/min avg`
-              : (r.bestGame ? `${r.bestGame.ppm.toFixed(1)}/min` : "");
+            const ratioStr = showAvg
+              ? (r.avgRatio>0 ? r.avgRatio.toFixed(2) : "—")
+              : (r.bestGame ? (isFinite(r.bestGame.ratio)?r.bestGame.ratio.toFixed(2):"∞") : "—");
+            const ppmStr = showAvg
+              ? r.avgPpm.toFixed(1)
+              : (r.bestGame ? r.bestGame.ppm.toFixed(1) : "—");
+            const ppsStr = showAvg
+              ? r.avgPps.toFixed(2)
+              : (r.bestGame ? r.bestGame.pps.toFixed(2) : "—");
             return (
-              <Card key={r.name} style={{ marginBottom:8 }}>
+              <Card key={r.key} style={{ marginBottom:8 }}>
                 <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                   <span style={{ color:i<3?T.accent:T.muted, fontSize:16, width:24 }}>
                     {i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}
                   </span>
-                  <div style={{ flex:1 }}>
+                  <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ color:T.text, fontWeight:700 }}>{r.name}</div>
-                    <div style={{ color:T.muted, fontSize:11 }}>
-                      {r.gameCount} game{r.gameCount!==1?"s":""} · {Math.round(r.minutesPlayed)}m total
+                    <div style={{ color:T.muted, fontSize:11, marginTop:2 }}>
+                      {ppmStr}/min · {ppsStr}/song · {ratioStr} +/-
                     </div>
                   </div>
                   <div style={{ textAlign:"right", marginRight:4 }}>
                     <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{mainVal}</div>
-                    <div style={{ color:T.muted, fontSize:11 }}>{subVal}</div>
+                    <div style={{ color:T.muted, fontSize:10 }}>{showAvg?"pts/game":"best pts"}</div>
                   </div>
-                  <Btn variant="ghost" small onClick={() => setDetailP(r.name)}>→</Btn>
+                  <Btn variant="ghost" small onClick={() => setDetailP(r.key)}>→</Btn>
                 </div>
               </Card>
             );
           })
         }
-        <Modal open={!!detailP} onClose={() => setDetailP(null)} title={detailP||""}>
+        <Modal open={!!detailP} onClose={() => setDetailP(null)} title={detailP && playerMap[detailP] ? playerMap[detailP].name : ""}>
           {detailP && playerMap[detailP] && <PlayerStatsCard p={playerMap[detailP]} />}
         </Modal>
       </>}
 
-      {tab==="stats" && <>
-        <Sel value={statsP||""} onChange={v=>setStatsP(v||null)} style={{ marginBottom:12 }}>
-          <option value="">— Select player —</option>
-          {Object.keys(playerMap).map(n => <option key={n} value={n}>{n}</option>)}
-        </Sel>
-        {statsP && playerMap[statsP] && <PlayerStatsCard p={playerMap[statsP]} />}
-      </>}
+      {tab==="stats" && <PlayersTab playerMap={playerMap} />}
 
       {tab==="playlists" && <PlaylistTab playlistMap={playlistMap} detailPl={detailPl} setDetailPl={setDetailPl} />}
     </div>
   );
 }
 
-function PlayerStatsCard({ p }) {
-  const fmt = (n) => Number.isInteger(n) ? n : n.toFixed(1);
+// ─── Players tab: searchable, sortable list with expandable stats ─────────────
+function PlayersTab({ playerMap }) {
+  const [search, setSearch]   = useState("");
+  const [sortBy, setSortBy]   = useState("name"); // name | points | minutes
+  const [expanded, setExpanded] = useState(null);
+
+  let players = Object.values(playerMap);
+  if (search.trim()) {
+    const q = search.toLowerCase().trim();
+    players = players.filter(p => p.name.toLowerCase().includes(q));
+  }
+  players = players.sort((a,b) => {
+    if (sortBy==="name")    return a.name.localeCompare(b.name);
+    if (sortBy==="points")  return b.correct - a.correct;
+    if (sortBy==="minutes") return b.minutesPlayed - a.minutesPlayed;
+    return 0;
+  });
+
   return (
     <div>
-      <Lbl>Totals</Lbl>
-      {[["Games",p.gameCount,T.text],
-        ["Total Points",p.correct,T.accent],
-        ["Total Wrong", p.incorrect>0?fmt(p.incorrect):0, T.red],
-        ["Total Minutes",Math.round(p.minutesPlayed),T.muted],
-        ["Total Songs",p.songsPlayed,T.muted],
-      ].map(([label,val,color]) => (
-        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
-          <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
-          <span style={{ color, fontWeight:700 }}>{val}</span>
-        </div>
-      ))}
+      <TInput value={search} onChange={setSearch} placeholder="Search players…" style={{ marginBottom:10 }} />
+      <div style={{ display:"flex", gap:6, marginBottom:12 }}>
+        {[["name","A–Z"],["points","Points"],["minutes","Minutes"]].map(([v,l]) => (
+          <button key={v} onClick={() => setSortBy(v)}
+            style={{ flex:1, padding:"7px 4px", borderRadius:8, border:`1px solid ${sortBy===v?T.accent:T.border}`,
+              background: sortBy===v?`${T.accent}22`:T.card, color: sortBy===v?T.accent:T.muted,
+              fontSize:12, fontWeight:600, cursor:"pointer" }}>
+            {l}
+          </button>
+        ))}
+      </div>
 
-      <Lbl style={{ marginTop:14 }}>Averages per game</Lbl>
-      {[["Points",p.avgCorrect.toFixed(1),T.accent],
-        ["Wrong guesses",p.avgIncorrect.toFixed(1),T.red],
-        ["Pts / Min",p.avgPpm.toFixed(2),T.blue],
-        ["+/- Ratio",p.avgRatio>0?p.avgRatio.toFixed(2):"—",T.green],
-      ].map(([label,val,color]) => (
-        <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
-          <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
-          <span style={{ color, fontWeight:700 }}>{val}</span>
-        </div>
-      ))}
+      {players.length===0
+        ? <div style={{ color:T.muted, textAlign:"center", padding:40 }}>No players found</div>
+        : players.map((p,i) => (
+          <div key={p.key} style={{ marginBottom:8 }}>
+            <div onClick={() => setExpanded(expanded===p.key?null:p.key)}
+              style={{ display:"flex", alignItems:"center", gap:12, background:T.card,
+                border:`1px solid ${T.border}`, borderRadius: expanded===p.key?"14px 14px 0 0":14,
+                padding:"12px 14px", cursor:"pointer" }}>
+              <div style={{ width:32, height:32, borderRadius:"50%", flexShrink:0, background:PC[i%PC.length],
+                display:"flex", alignItems:"center", justifyContent:"center", color:"#0E1117", fontWeight:800, fontSize:13 }}>
+                {p.name[0]?.toUpperCase()}
+              </div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color:T.text, fontWeight:700, fontSize:14 }}>{p.name}</div>
+                <div style={{ color:T.muted, fontSize:11 }}>
+                  {p.gameCount} game{p.gameCount!==1?"s":""} · {Math.round(p.minutesPlayed)}m
+                </div>
+              </div>
+              <div style={{ textAlign:"right", marginRight:4 }}>
+                <div style={{ color:T.accent, fontWeight:800, fontSize:18 }}>{p.correct}</div>
+                <div style={{ color:T.muted, fontSize:10 }}>points</div>
+              </div>
+              <span style={{ color:T.muted, fontSize:16, transform:expanded===p.key?"rotate(90deg)":"none", transition:"transform .15s" }}>›</span>
+            </div>
+            {expanded===p.key && (
+              <div style={{ background:T.surface, border:`1px solid ${T.border}`, borderTop:"none",
+                borderRadius:"0 0 14px 14px", padding:"4px 14px 14px" }}>
+                <PlayerStatsCard p={p} compact />
+              </div>
+            )}
+          </div>
+        ))
+      }
+    </div>
+  );
+}
 
-      {p.bestGame ? <>
-        <Lbl style={{ marginTop:14 }}>Best game <span style={{ color:T.muted, fontWeight:400, textTransform:"none", fontSize:10 }}>(min. 10 min)</span></Lbl>
-        {[["Points",p.bestGame.correct,T.accent],
-          ["Wrong",fmt(p.bestGame.incorrect),T.red],
-          ["Pts / Min",p.bestGame.ppm.toFixed(2),T.blue],
-          ["+/- Ratio",isFinite(p.bestGame.ratio)?p.bestGame.ratio.toFixed(2):"∞",T.green],
-          ["Duration",`${Math.round(p.bestGame.minutes)}m`,T.muted],
-        ].map(([label,val,color]) => (
-          <div key={label} style={{ display:"flex", justifyContent:"space-between", padding:"7px 0", borderBottom:`1px solid ${T.border}` }}>
-            <span style={{ color:T.muted, fontSize:13 }}>{label}</span>
-            <span style={{ color, fontWeight:700 }}>{val}</span>
+function PlayerStatsCard({ p, compact }) {
+  const fmt = (n) => Number.isInteger(n) ? n : n.toFixed(1);
+
+  function StatGrid({ stats }) {
+    return (
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:4 }}>
+        {stats.map(([label,val,color]) => (
+          <div key={label} style={{ background:compact?T.card:T.surface, borderRadius:8, padding:"8px 10px" }}>
+            <div style={{ color:T.muted, fontSize:10, textTransform:"uppercase", letterSpacing:"0.04em" }}>{label}</div>
+            <div style={{ color:color||T.text, fontWeight:800, fontSize:16, marginTop:2 }}>{val}</div>
           </div>
         ))}
-      </> : (
-        <div style={{ color:T.muted, fontSize:12, marginTop:12, fontStyle:"italic" }}>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <Lbl style={{ marginTop: compact?8:0 }}>Averages per game</Lbl>
+      <StatGrid stats={[
+        ["Points", p.avgCorrect.toFixed(1), T.accent],
+        ["+/- Ratio", p.avgRatio>0?p.avgRatio.toFixed(2):"—", T.green],
+        ["Pts / Min", p.avgPpm.toFixed(2), T.blue],
+        ["Pts / Song", p.avgPps.toFixed(2), T.purple],
+      ]} />
+
+      <Lbl style={{ marginTop:14 }}>Best game <span style={{ color:T.muted, fontWeight:400, textTransform:"none", fontSize:10 }}>(min. 10 min)</span></Lbl>
+      {p.bestGame ? (
+        <StatGrid stats={[
+          ["Points", p.bestGame.correct, T.accent],
+          ["+/- Ratio", isFinite(p.bestGame.ratio)?p.bestGame.ratio.toFixed(2):"∞", T.green],
+          ["Pts / Min", p.bestGame.ppm.toFixed(2), T.blue],
+          ["Pts / Song", p.bestGame.pps.toFixed(2), T.purple],
+        ]} />
+      ) : (
+        <div style={{ color:T.muted, fontSize:12, padding:"4px 0 8px", fontStyle:"italic" }}>
           No qualifying games yet (need 10+ minutes)
         </div>
       )}
 
-      <Lbl style={{ marginTop:14 }}>Category % (all time)</Lbl>
-      {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => (
-        <div key={k} style={{ display:"flex", justifyContent:"space-between", padding:"6px 0", borderBottom:`1px solid ${T.border}` }}>
-          <span style={{ color:T.muted, fontSize:13 }}>{l}</span>
-          <span style={{ color:T.text, fontSize:13 }}>{fmtPct(p[k][0],p[k][1])} ({p[k][0]}/{p[k][1]})</span>
-        </div>
-      ))}
+      <Lbl style={{ marginTop:14 }}>All-time totals</Lbl>
+      <StatGrid stats={[
+        ["Games", p.gameCount, T.text],
+        ["Points", p.correct, T.accent],
+        ["Wrong", p.incorrect>0?fmt(p.incorrect):0, T.red],
+        ["+/- Ratio", isFinite(p.overallRatio)?(p.overallRatio>0?p.overallRatio.toFixed(2):"—"):"∞", T.green],
+        ["Minutes", Math.round(p.minutesPlayed), T.muted],
+        ["Songs", p.songsPlayed, T.muted],
+      ]} />
+
+      <Lbl style={{ marginTop:14 }}>Category accuracy</Lbl>
+      {[["title","Song Title 🎵"],["artist","Artist 🎤"],["album","Album 💿"]].map(([k,l]) => {
+        const [c,pos] = p[k];
+        if (!pos && k==="album") return null;
+        const pct = pos ? Math.round((c/pos)*100) : 0;
+        return (
+          <div key={k} style={{ marginBottom:8 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+              <span style={{ color:T.muted, fontSize:12 }}>{l}</span>
+              <span style={{ color:T.text, fontSize:12, fontWeight:600 }}>{fmtPct(c,pos)} ({c}/{pos})</span>
+            </div>
+            <div style={{ height:5, borderRadius:3, background:T.border }}>
+              <div style={{ height:5, borderRadius:3, width:`${pct}%`, background:`linear-gradient(90deg,${T.accent},${T.accentL})` }} />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
