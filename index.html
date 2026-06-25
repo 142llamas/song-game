@@ -496,34 +496,32 @@ function useSpotify(ready) {
   }, [ready]);
 
   async function playPlaylist(playlistUrl) {
+    console.log("[Spotify] playPlaylist called with URL:", playlistUrl);
     var m = (playlistUrl||"").match(/playlist[/:]([A-Za-z0-9]+)/);
-    if (!m) return false;
+    if (!m) { console.warn("[Spotify] Could not extract playlist ID from URL:", playlistUrl); return false; }
     var playlistId = m[1];
     var context_uri = "spotify:playlist:" + playlistId;
+    console.log("[Spotify] Playlist ID:", playlistId, "| device:", deviceId);
+
+    if (!deviceId) {
+      console.warn("[Spotify] No device ready yet — player not initialized");
+      return false;
+    }
+
     try {
-      // Wake/transfer to our in-browser device first
-      if (deviceId) {
-        await spotifyApi("/me/player/play?device_id=" + deviceId, "PUT", { context_uri: context_uri }).catch(function(){});
-        await new Promise(function(r) { setTimeout(r, 400); });
-      }
+      // 1. Turn shuffle ON first (so the playlist starts in a random order)
+      await spotifyApi("/me/player/shuffle?state=true&device_id=" + deviceId, "PUT").catch(function(e){ console.warn("[Spotify] shuffle pre-set failed:", e.message); });
 
-      // Enable Spotify's shuffle BEFORE play so the starting track is randomized
-      await spotifyApi("/me/player/shuffle?state=true" + (deviceId ? "&device_id=" + deviceId : ""), "PUT").catch(function(){});
+      // 2. Play the selected playlist on OUR device. Specifying the device_id
+      //    transfers playback here and starts the correct playlist context.
+      await spotifyApi("/me/player/play?device_id=" + deviceId, "PUT", { context_uri: context_uri });
 
-      // Start playback of the playlist context. With shuffle on, Spotify picks
-      // a random track order. We don't specify an offset so shuffle controls order.
-      var playPath = deviceId ? "/me/player/play?device_id=" + deviceId : "/me/player/play";
-      await spotifyApi(playPath, "PUT", { context_uri: context_uri });
-
-      // Re-assert shuffle after play (Spotify sometimes resets it on context change)
-      await new Promise(function(r) { setTimeout(r, 300); });
-      await spotifyApi("/me/player/shuffle?state=true" + (deviceId ? "&device_id=" + deviceId : ""), "PUT").catch(function(){});
-      // Skip to next once so we don't always start on the same first shuffled track
-      await spotifyApi("/me/player/next" + (deviceId ? "?device_id=" + deviceId : ""), "POST").catch(function(){});
-
-      console.log("[Spotify] Playing playlist with shuffle");
+      console.log("[Spotify] Started playlist:", context_uri);
       return true;
-    } catch(e) { console.error("[Spotify] playPlaylist failed:", e); return false; }
+    } catch(e) {
+      console.error("[Spotify] playPlaylist failed:", e);
+      return false;
+    }
   }
 
   async function togglePlay() {
