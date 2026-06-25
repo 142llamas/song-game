@@ -116,6 +116,9 @@ const db = {
   },
   deletePlaylist: (id) => fbDb.ref(`playlists/${id}`).remove(),
 
+  // Games — delete
+  deleteGame: (gameId) => fbDb.ref(`games/${gameId}`).remove(),
+
   // Shares
   saveShare: (code, data) => fbDb.ref(`shares/${code}`).set(data),
   getShare:  (code)       => fbDb.ref(`shares/${code}`).get().then(s => s.val()),
@@ -457,7 +460,7 @@ function PlaylistLink({ url, style={} }) {
 // `returnScreen` is the screen name to come back to after Spotify login redirect.
 function SpotifyBar({ sp, playlistUrl, returnScreen="home" }) {
   const [showTrack, setShowTrack] = useState(false);   // hidden by default — avoids spoilers
-  const [shuffleOn, setShuffleOn] = useState(false);
+  const [shuffleOn, setShuffleOn] = useState(true);    // shuffle on by default
   const isSpotifyPlaylist = /open\.spotify\.com\/playlist|spotify:playlist/.test(playlistUrl||"");
 
   // Not connected: offer to connect.
@@ -670,10 +673,33 @@ function useSpotify(ready) {
     // https://open.spotify.com/playlist/37i9dQ...  → 37i9dQ...
     const m = (playlistUrl||"").match(/playlist[/:]([A-Za-z0-9]+)/);
     if (!m) return false;
-    const context_uri = `spotify:playlist:${m[1]}`;
+    const playlistId = m[1];
+    const context_uri = `spotify:playlist:${playlistId}`;
     try {
-      const path = deviceId ? `/me/player/play?device_id=${deviceId}` : "/me/player/play";
-      await spotifyApi(path, "PUT", { context_uri });
+      // Step 1: enable shuffle BEFORE starting playback (sets the shuffle seed)
+      const shufflePath = deviceId
+        ? `/me/player/shuffle?state=true&device_id=${deviceId}`
+        : `/me/player/shuffle?state=true`;
+      await spotifyApi(shufflePath, "PUT").catch(() => {}); // non-fatal if it fails
+
+      // Step 2: fetch playlist tracks so we can pick a random starting position.
+      // We only need total count — fetch minimal fields, limit 1.
+      let offset = 0;
+      try {
+        const plData = await spotifyApi(`/playlists/${playlistId}?fields=tracks.total`);
+        const total = plData?.tracks?.total || 0;
+        if (total > 1) {
+          // Pick a random track index as starting position.
+          offset = Math.floor(Math.random() * total);
+        }
+      } catch (e) { /* if we can't get the count, just start from beginning */ }
+
+      // Step 3: start playback from the randomly chosen track.
+      const playPath = deviceId ? `/me/player/play?device_id=${deviceId}` : "/me/player/play";
+      await spotifyApi(playPath, "PUT", {
+        context_uri,
+        offset: { position: offset },
+      });
       return true;
     } catch (e) { console.error("[Spotify] play playlist failed:", e); return false; }
   }
@@ -686,6 +712,10 @@ function useSpotify(ready) {
       if (state?.is_playing) await spotifyApi("/me/player/pause", "PUT");
       else await spotifyApi("/me/player/play", "PUT");
     } catch (e) { console.error(e); }
+  }
+  async function pause() {
+    if (playerRef.current) { await playerRef.current.pause(); return; }
+    try { await spotifyApi("/me/player/pause", "PUT"); } catch (e) { console.error(e); }
   }
   async function next() {
     if (playerRef.current) { playerRef.current.nextTrack(); return; }
@@ -717,7 +747,7 @@ function useSpotify(ready) {
   }
 
   return { status, track, profile, deviceId, login: spotifyLogin, disconnect,
-           playPlaylist, togglePlay, toggleShuffle, next, previous };
+           playPlaylist, togglePlay, pause, toggleShuffle, next, previous };
 }
 
 // ─── Score computation ────────────────────────────────────────────────────────
@@ -982,13 +1012,38 @@ function HomeScreen({ onNav, myGames, user, sp }) {
           <Btn variant="secondary" small onClick={() => sp.login("home")}>Connect</Btn>
         </div>
       ) : sp.status === "connected" ? (
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
-          background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:20,
+        <div style={{ background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:20,
           border:`1px solid ${T.green}44` }}>
-          <span style={{ color:T.green, fontSize:13, fontWeight:600 }}>
-            🟢 Spotify connected{sp.profile?.display_name ? ` · ${sp.profile.display_name}` : ""}
-          </span>
-          <Btn variant="ghost" small onClick={sp.disconnect}>Disconnect</Btn>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: sp.track ? 8 : 0 }}>
+            <span style={{ color:T.green, fontSize:13, fontWeight:600 }}>
+              🟢 Spotify{sp.profile?.display_name ? ` · ${sp.profile.display_name}` : ""}
+            </span>
+            <Btn variant="ghost" small onClick={sp.disconnect}>Disconnect</Btn>
+          </div>
+          {sp.track && (
+            <div>
+              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                {sp.track.art && <img src={sp.track.art} alt="" style={{ width:36, height:36, borderRadius:4, flexShrink:0 }} />}
+                <div style={{ minWidth:0, flex:1 }}>
+                  <div style={{ color:sp.track.paused ? T.muted : T.text, fontSize:12, fontWeight:600,
+                    whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                    {sp.track.paused ? "⏸ " : "▶ "}{sp.track.name}
+                  </div>
+                  <div style={{ color:T.muted, fontSize:11, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                    {sp.track.artist}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:6 }}>
+                <Btn variant="secondary" small onClick={sp.previous} style={{ flex:1 }}>⏮</Btn>
+                <Btn variant="secondary" small onClick={sp.togglePlay} style={{ flex:1 }}>
+                  {sp.track.paused ? "▶" : "⏸"}
+                </Btn>
+                <Btn variant="secondary" small onClick={sp.next} style={{ flex:1 }}>⏭</Btn>
+                <Btn variant="secondary" small onClick={sp.pause} style={{ flex:1 }}>⏹ Stop</Btn>
+              </div>
+            </div>
+          )}
         </div>
       ) : sp.status === "no-premium" ? (
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
@@ -1187,10 +1242,25 @@ function SetupScreen({ playlists, onStart, onBack, user }) {
         {playlists.length > 0 && (
           <Sel value={selPl} onChange={v => { setSelPl(v); if(v) setShowNewPl(false); }} style={{ marginBottom:8 }}>
             <option value="">— Select saved playlist —</option>
-            {playlists.map(pl => <option key={pl.id} value={pl.name}>{pl.name}</option>)}
+            {playlists.map(pl => {
+              const hasSpotify = /open\.spotify\.com\/playlist|spotify:playlist/.test(pl.url||"");
+              return (
+                <option key={pl.id} value={pl.name}>
+                  {hasSpotify ? "🟢 " : "     "}{pl.name}
+                </option>
+              );
+            })}
           </Sel>
         )}
         {selPlObj?.url && <div style={{ marginBottom:8 }}><PlaylistLink url={selPlObj.url} /></div>}
+        {selPlObj && !selPlObj.url && (
+          <div style={{ fontSize:11, color:T.muted, marginBottom:8 }}>No link saved for this playlist</div>
+        )}
+        {selPlObj?.url && !/open\.spotify\.com\/playlist|spotify:playlist/.test(selPlObj.url) && (
+          <div style={{ fontSize:11, color:T.muted, marginBottom:8 }}>
+            ⚠️ Not a Spotify playlist — in-app controls won't be available
+          </div>
+        )}
         {showNewPl ? (
           <div>
             <TInput value={newPl} onChange={setNewPl} placeholder="New playlist name" style={{ marginBottom:8 }} />
@@ -1352,7 +1422,10 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, sp }) {
     return () => clearTimeout(t);
   }, [countdown]);
 
-  async function endGame() {
+  async function endGame(stopMusic = false) {
+    if (stopMusic && sp?.status === "connected") {
+      await sp.pause().catch(() => {});
+    }
     const final = { ...game, elapsedSeconds:timer.secs, endedAt:Date.now(), status:"complete" };
     await db.saveGame(final);
     onEndGame(final);
@@ -1440,11 +1513,33 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, sp }) {
       )}
 
       <Modal open={showEnd} onClose={() => setShowEnd(false)} title="End Game?">
-        <p style={{ color:T.muted, fontSize:14, marginBottom:16 }}>This will save the game and show the final summary.</p>
-        <div style={{ display:"flex", gap:10 }}>
-          <Btn variant="ghost" onClick={() => setShowEnd(false)} style={{ flex:1 }}>Cancel</Btn>
-          <Btn variant="danger" onClick={() => { setShowEnd(false); endGame(); }} style={{ flex:1 }}>End Game</Btn>
-        </div>
+        <p style={{ color:T.muted, fontSize:14, marginBottom:16 }}>
+          This will save the game and show the final summary.
+        </p>
+        {sp?.status === "connected" && sp?.track && !sp?.track?.paused ? (
+          // Spotify is actively playing — give the choice
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <Btn variant="danger" onClick={() => { setShowEnd(false); endGame(true); }}
+              style={{ width:"100%" }}>
+              End Game + Stop Music
+            </Btn>
+            <Btn variant="secondary" onClick={() => { setShowEnd(false); endGame(false); }}
+              style={{ width:"100%" }}>
+              End Game, Keep Music Playing
+            </Btn>
+            <Btn variant="ghost" onClick={() => setShowEnd(false)} style={{ width:"100%" }}>
+              Cancel
+            </Btn>
+          </div>
+        ) : (
+          // No Spotify / already paused — single button
+          <div style={{ display:"flex", gap:10 }}>
+            <Btn variant="ghost" onClick={() => setShowEnd(false)} style={{ flex:1 }}>Cancel</Btn>
+            <Btn variant="danger" onClick={() => { setShowEnd(false); endGame(false); }} style={{ flex:1 }}>
+              End Game
+            </Btn>
+          </div>
+        )}
       </Modal>
 
       <Modal open={showScores} onClose={() => setShowScores(false)} title="Live Scores">
@@ -2008,10 +2103,11 @@ function PlaylistDetail({ pl, expPlayer, setExpPlayer }) {
 }
 
 // ─── History ──────────────────────────────────────────────────────────────────
-function HistoryScreen({ myGames, onUpdateGame, onBack }) {
+function HistoryScreen({ myGames, onUpdateGame, onDeleteGame, onBack }) {
   const [search, setSearch] = useState("");
   const [fMode, setFMode]   = useState("all");
-  const [editGame, setEditGame] = useState(null);
+  const [editGame, setEditGame]     = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(null); // game to delete
 
   const filtered = myGames.filter(g => {
     if (fMode!=="all" && g.mode!==fMode) return false;
@@ -2027,6 +2123,12 @@ function HistoryScreen({ myGames, onUpdateGame, onBack }) {
     await db.saveGame(updated);
     onUpdateGame(updated);
     setEditGame(null);
+  }
+
+  async function confirmDelete(g) {
+    await db.deleteGame(g.id);
+    onDeleteGame(g.id);
+    setDeleteConfirm(null);
   }
 
   return (
@@ -2068,7 +2170,10 @@ function HistoryScreen({ myGames, onUpdateGame, onBack }) {
                   ))}
                 </div>
               </div>
-              <Btn variant="ghost" small onClick={() => setEditGame({...g})}>Edit</Btn>
+              <div style={{ display:"flex", gap:6, flexShrink:0 }}>
+                <Btn variant="ghost" small onClick={() => setEditGame({...g})}>Edit</Btn>
+                <Btn variant="danger" small onClick={() => setDeleteConfirm(g)}>Delete</Btn>
+              </div>
             </div>
           </Card>
         ))
@@ -2076,6 +2181,23 @@ function HistoryScreen({ myGames, onUpdateGame, onBack }) {
 
       <Modal open={!!editGame} onClose={() => setEditGame(null)} title="Edit Game">
         {editGame && <GameEditForm game={editGame} onChange={setEditGame} onSave={saveEdit} onCancel={() => setEditGame(null)} />}
+      </Modal>
+
+      <Modal open={!!deleteConfirm} onClose={() => setDeleteConfirm(null)} title="Delete Game?">
+        {deleteConfirm && (
+          <div>
+            <p style={{ color:T.muted, fontSize:14, marginBottom:6 }}>
+              This permanently removes the game from the database and all stats.
+            </p>
+            <p style={{ color:T.text, fontSize:13, fontWeight:600, marginBottom:16 }}>
+              {deleteConfirm.players.map(p=>p.name).join(", ")} · {new Date(deleteConfirm.startedAt).toLocaleDateString()} · {(deleteConfirm.songs||[]).filter(s=>!s.skipped).length} songs
+            </p>
+            <div style={{ display:"flex", gap:10 }}>
+              <Btn variant="ghost" onClick={() => setDeleteConfirm(null)} style={{ flex:1 }}>Cancel</Btn>
+              <Btn variant="danger" onClick={() => confirmDelete(deleteConfirm)} style={{ flex:1 }}>Delete Forever</Btn>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
@@ -2380,6 +2502,8 @@ function App() {
       {screen==="scoreboard" && <ScoreboardScreen allGames={allGames} playlists={playlists} onBack={() => setScreen("home")} />}
       {screen==="history"    && <HistoryScreen myGames={myGames} onUpdateGame={g => {
           setMyGames(prev => prev.map(x=>x.id===g.id?g:x));
+        }} onDeleteGame={id => {
+          setMyGames(prev => prev.filter(x=>x.id!==id));
         }} onBack={() => setScreen("home")} />}
       {screen==="playlists"  && <PlaylistScreen playlists={playlists} onBack={() => setScreen("home")} />}
     </div>
