@@ -190,11 +190,13 @@ const spotifyTokens = {
 };
 
 // ── Step 1: send the user to Spotify to log in and approve ────────────────────
-async function spotifyLogin() {
+async function spotifyLogin(returnScreen) {
   const verifier  = spotifyRandomString(64);
   const challenge = spotifyBase64url(await spotifySha256(verifier));
   // Stash the verifier so we can use it when Spotify redirects back.
   sessionStorage.setItem("sp_verifier", verifier);
+  // Remember which screen the user was on so we can return them there after login.
+  sessionStorage.setItem("sp_return_screen", returnScreen || "home");
 
   const params = new URLSearchParams({
     client_id: SPOTIFY.CLIENT_ID,
@@ -247,7 +249,10 @@ async function spotifyHandleRedirect() {
   }
   // Clean the ?code=... out of the URL so refreshes don't re-trigger it.
   window.history.replaceState({}, document.title, SPOTIFY.REDIRECT_URI);
-  return true;
+  // Return the screen to go back to (set before we redirected away).
+  const returnScreen = sessionStorage.getItem("sp_return_screen") || "home";
+  sessionStorage.removeItem("sp_return_screen");
+  return returnScreen;
 }
 
 // ── Refresh an expired access token using the stored refresh token ────────────
@@ -449,16 +454,19 @@ function PlaylistLink({ url, style={} }) {
 // ─── Spotify control bar ──────────────────────────────────────────────────────
 // Shows connect button, or playback controls + current track once connected.
 // `playlistUrl` is the current game's playlist (used for the "play" button).
-function SpotifyBar({ sp, playlistUrl, showTrack=true }) {
+// `returnScreen` is the screen name to come back to after Spotify login redirect.
+function SpotifyBar({ sp, playlistUrl, returnScreen="home" }) {
+  const [showTrack, setShowTrack] = useState(false);   // hidden by default — avoids spoilers
+  const [shuffleOn, setShuffleOn] = useState(false);
   const isSpotifyPlaylist = /open\.spotify\.com\/playlist|spotify:playlist/.test(playlistUrl||"");
 
-  // Not connected: offer to connect (only meaningful if Client ID is set).
+  // Not connected: offer to connect.
   if (sp.status === "disconnected") {
     return (
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
         background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
         <span style={{ color:T.muted, fontSize:13 }}>🟢 Connect Spotify for in-app controls</span>
-        <Btn variant="secondary" small onClick={sp.login}>Connect</Btn>
+        <Btn variant="secondary" small onClick={() => sp.login(returnScreen)}>Connect</Btn>
       </div>
     );
   }
@@ -491,24 +499,59 @@ function SpotifyBar({ sp, playlistUrl, showTrack=true }) {
   return (
     <div style={{ background:T.surface, borderRadius:12, padding:"12px 14px", marginBottom:14,
       border:`1px solid ${T.green}44` }}>
+
+      {/* Track info — shown only when the user deliberately reveals it */}
       {showTrack && t && (
-        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10,
+          background:T.card, borderRadius:8, padding:"8px 10px" }}>
           {t.art && <img src={t.art} alt="" style={{ width:42, height:42, borderRadius:6, flexShrink:0 }} />}
           <div style={{ minWidth:0, flex:1 }}>
-            <div style={{ color:T.text, fontWeight:700, fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
-            <div style={{ color:T.muted, fontSize:11, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.artist}{t.album?` · ${t.album}`:""}</div>
+            <div style={{ color:T.text, fontWeight:700, fontSize:13,
+              whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
+            <div style={{ color:T.muted, fontSize:11,
+              whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+              {t.artist}{t.album?` · ${t.album}`:""}
+            </div>
           </div>
         </div>
       )}
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+
+      {/* Main control row */}
+      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+
+        {/* Start playlist button (only for Spotify playlist URLs) */}
         {isSpotifyPlaylist && (
-          <Btn variant="success" small onClick={() => sp.playPlaylist(playlistUrl)} style={{ flexShrink:0 }}>▶ Start</Btn>
+          <Btn variant="success" small onClick={() => sp.playPlaylist(playlistUrl)}
+            style={{ flexShrink:0 }}>▶</Btn>
         )}
-        <div style={{ display:"flex", gap:6, flex:1, justifyContent:"center" }}>
-          <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:44 }}>⏮</Btn>
-          <Btn variant="secondary" small onClick={sp.togglePlay} style={{ minWidth:44 }}>{t && !t.paused ? "⏸" : "▶"}</Btn>
-          <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:44 }}>⏭</Btn>
-        </div>
+
+        {/* Playback controls */}
+        <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:36 }}>⏮</Btn>
+        <Btn variant="secondary" small onClick={sp.togglePlay} style={{ minWidth:36 }}>
+          {t && !t.paused ? "⏸" : "▶"}
+        </Btn>
+        <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:36 }}>⏭</Btn>
+
+        {/* Shuffle toggle */}
+        <Btn
+          variant={shuffleOn ? "success" : "secondary"}
+          small
+          onClick={async () => { const next = await sp.toggleShuffle(shuffleOn); setShuffleOn(next); }}
+          style={{ minWidth:36, opacity: shuffleOn ? 1 : 0.6 }}
+          title="Shuffle">
+          🔀
+        </Btn>
+
+        {/* Reveal / hide track info (the anti-spoiler toggle) */}
+        <Btn
+          variant={showTrack ? "secondary" : "ghost"}
+          small
+          onClick={() => setShowTrack(v => !v)}
+          style={{ flex:1, fontSize:11 }}>
+          {showTrack ? "Hide song info" : "👁 Reveal"}
+        </Btn>
+
+        {/* Disconnect */}
         <Btn variant="ghost" small onClick={sp.disconnect} style={{ flexShrink:0 }}>✕</Btn>
       </div>
     </div>
@@ -652,6 +695,17 @@ function useSpotify(ready) {
     if (playerRef.current) { playerRef.current.previousTrack(); return; }
     try { await spotifyApi("/me/player/previous", "POST"); } catch (e) { console.error(e); }
   }
+  async function toggleShuffle(currentOn) {
+    // currentOn is the current shuffle state so we flip it
+    const newVal = !currentOn;
+    try {
+      const path = deviceId
+        ? `/me/player/shuffle?state=${newVal}&device_id=${deviceId}`
+        : `/me/player/shuffle?state=${newVal}`;
+      await spotifyApi(path, "PUT");
+    } catch (e) { console.error("[Spotify] shuffle failed:", e); }
+    return newVal;
+  }
 
   function disconnect() {
     if (playerRef.current) { playerRef.current.disconnect(); playerRef.current = null; }
@@ -663,7 +717,7 @@ function useSpotify(ready) {
   }
 
   return { status, track, profile, deviceId, login: spotifyLogin, disconnect,
-           playPlaylist, togglePlay, next, previous };
+           playPlaylist, togglePlay, toggleShuffle, next, previous };
 }
 
 // ─── Score computation ────────────────────────────────────────────────────────
@@ -894,7 +948,7 @@ function ProfileSetupScreen({ googleName, onSave }) {
 }
 
 // ─── Home ─────────────────────────────────────────────────────────────────────
-function HomeScreen({ onNav, myGames, user }) {
+function HomeScreen({ onNav, myGames, user, sp }) {
   const recent = myGames.slice(0, 3);
   return (
     <div style={{ padding:20, maxWidth:460, margin:"0 auto" }}>
@@ -908,7 +962,7 @@ function HomeScreen({ onNav, myGames, user }) {
         🎵 New Game
       </Btn>
 
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:24 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:16 }}>
         {[["📊","Scoreboard","scoreboard"],["📜","My History","history"],["💽","Playlists","playlists"]].map(([icon,label,s])=>(
           <button key={s} onClick={() => onNav(s)}
             style={{ background:T.card, border:`1px solid ${T.border}`, borderRadius:12,
@@ -918,6 +972,34 @@ function HomeScreen({ onNav, myGames, user }) {
           </button>
         ))}
       </div>
+
+      {/* Spotify connection status row */}
+      {sp && (sp.status === "disconnected" ? (
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:20,
+          border:`1px solid ${T.border}` }}>
+          <span style={{ color:T.muted, fontSize:13 }}>🟢 Connect Spotify</span>
+          <Btn variant="secondary" small onClick={() => sp.login("home")}>Connect</Btn>
+        </div>
+      ) : sp.status === "connected" ? (
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:20,
+          border:`1px solid ${T.green}44` }}>
+          <span style={{ color:T.green, fontSize:13, fontWeight:600 }}>
+            🟢 Spotify connected{sp.profile?.display_name ? ` · ${sp.profile.display_name}` : ""}
+          </span>
+          <Btn variant="ghost" small onClick={sp.disconnect}>Disconnect</Btn>
+        </div>
+      ) : sp.status === "no-premium" ? (
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+          background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:20,
+          border:`1px solid ${T.border}` }}>
+          <span style={{ color:T.muted, fontSize:13 }}>
+            🟢 Spotify connected (free plan — controls need Premium)
+          </span>
+          <Btn variant="ghost" small onClick={sp.disconnect}>✕</Btn>
+        </div>
+      ) : null)}
 
       {recent.length > 0 && <>
         <Lbl>Recent Games</Lbl>
@@ -1295,7 +1377,7 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists, sp }) {
         </div>
       </div>
 
-      {sp && <SpotifyBar sp={sp} playlistUrl={game.playlistUrl} />}
+      {sp && <SpotifyBar sp={sp} playlistUrl={game.playlistUrl} returnScreen="game" />}
 
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
         background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
@@ -2189,7 +2271,14 @@ function App() {
 
   // ── Handle the Spotify login redirect (?code=...) once on load ──────────────
   useEffect(() => {
-    spotifyHandleRedirect().finally(() => setSpotifyReady(true));
+    spotifyHandleRedirect().then(returnScreen => {
+      if (!returnScreen || returnScreen === "home") return;
+      // "game" return: Spotify redirected back mid-game. But a fresh page load means
+      // currentGame is gone from memory — we can't restore it. Send home instead of
+      // showing a blank game screen. The Spotify connection will still be established.
+      // (In practice the game host rarely connects mid-game, but handle it cleanly.)
+      setScreen("home");
+    }).finally(() => setSpotifyReady(true));
   }, []);
 
   const sp = useSpotify(spotifyReady);
@@ -2274,7 +2363,7 @@ function App() {
       {screen !== "game" && <TopBar user={appUser} onOpenAccount={() => setShowAccount(true)} />}
       <AccountModal open={showAccount} onClose={() => setShowAccount(false)} user={appUser} />
 
-      {screen==="home" && <HomeScreen onNav={setScreen} myGames={myGames} user={appUser} />}
+      {screen==="home" && <HomeScreen onNav={setScreen} myGames={myGames} user={appUser} sp={sp} />}
       {screen==="setup" && <SetupScreen playlists={playlists} onStart={startGame} onBack={() => setScreen("home")} user={appUser} />}
       {screen==="game" && currentGame && (
         <GameScreen game={currentGame} onUpdateGame={setCurrentGame} onEndGame={handleEndGame}
