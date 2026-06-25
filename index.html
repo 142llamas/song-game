@@ -12,6 +12,8 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<!-- Spotify Web Playback SDK -->
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; background: #0E1117; font-family: -apple-system, 'Inter', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
@@ -118,6 +120,187 @@ const db = {
   saveShare: (code, data) => fbDb.ref(`shares/${code}`).set(data),
   getShare:  (code)       => fbDb.ref(`shares/${code}`).get().then(s => s.val()),
 };
+
+// ─── Spotify integration (PKCE flow, no backend needed) ───────────────────────
+// This whole block is plain JS so it can run before React and handle the
+// redirect that Spotify sends the user back to after they log in.
+
+const SPOTIFY = {
+  // ▼▼▼ EDIT THIS ONE LINE: paste your Client ID from the Spotify dashboard ▼▼▼
+  CLIENT_ID: "2d460cd102fc4ce9bf4ea4e97b1831eb",
+  // ▲▲▲ ─────────────────────────────────────────────────────────────────── ▲▲▲
+
+  // Redirect URI is auto-detected from wherever the app is running.
+  // Whatever this evaluates to, you must register the SAME string in your
+  // Spotify app's "Redirect URIs" settings (it gets logged to the console
+  // on load so you can copy it exactly).
+  get REDIRECT_URI() {
+    // Strip any query string / hash so it matches the registered URI cleanly.
+    return window.location.origin + window.location.pathname;
+  },
+
+  // Permissions we ask the user for. These cover reading playback state and
+  // controlling playback. Nothing here lets us see private data beyond playback.
+  SCOPES: [
+    "streaming",
+    "user-read-email",
+    "user-read-private",
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+  ].join(" "),
+
+  AUTH_URL:  "https://accounts.spotify.com/authorize",
+  TOKEN_URL: "https://accounts.spotify.com/api/token",
+};
+
+// Log the redirect URI on load so you can copy the exact value into Spotify.
+console.log("[Spotify] Register this exact Redirect URI in your Spotify app settings:", SPOTIFY.REDIRECT_URI);
+
+// ── PKCE helper functions (the cryptographic handshake Spotify requires) ──────
+function spotifyRandomString(length) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const arr = new Uint8Array(length);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => chars[b % chars.length]).join("");
+}
+async function spotifySha256(plain) {
+  const data = new TextEncoder().encode(plain);
+  return await crypto.subtle.digest("SHA-256", data);
+}
+function spotifyBase64url(buffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// ── Token storage (kept in memory + sessionStorage so a refresh survives) ─────
+const spotifyTokens = {
+  get access()  { try { return JSON.parse(sessionStorage.getItem("sp_tokens"))?.access_token || null; } catch { return null; } },
+  get refresh() { try { return JSON.parse(sessionStorage.getItem("sp_tokens"))?.refresh_token || null; } catch { return null; } },
+  get expiry()  { try { return JSON.parse(sessionStorage.getItem("sp_tokens"))?.expires_at || 0; } catch { return 0; } },
+  save(data) {
+    const stored = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token || this.refresh, // refresh token may not be re-sent
+      expires_at: Date.now() + (data.expires_in * 1000) - 60000, // refresh 1 min early
+    };
+    sessionStorage.setItem("sp_tokens", JSON.stringify(stored));
+  },
+  clear() { sessionStorage.removeItem("sp_tokens"); },
+};
+
+// ── Step 1: send the user to Spotify to log in and approve ────────────────────
+async function spotifyLogin() {
+  const verifier  = spotifyRandomString(64);
+  const challenge = spotifyBase64url(await spotifySha256(verifier));
+  // Stash the verifier so we can use it when Spotify redirects back.
+  sessionStorage.setItem("sp_verifier", verifier);
+
+  const params = new URLSearchParams({
+    client_id: SPOTIFY.CLIENT_ID,
+    response_type: "code",
+    redirect_uri: SPOTIFY.REDIRECT_URI,
+    scope: SPOTIFY.SCOPES,
+    code_challenge_method: "S256",
+    code_challenge: challenge,
+  });
+  window.location.href = `${SPOTIFY.AUTH_URL}?${params.toString()}`;
+}
+
+// ── Step 2: when Spotify redirects back with ?code=..., trade it for tokens ───
+// Returns true if it handled a login redirect, false otherwise.
+async function spotifyHandleRedirect() {
+  const params = new URLSearchParams(window.location.search);
+  const code  = params.get("code");
+  const error = params.get("error");
+  if (error) {
+    console.warn("[Spotify] Login error:", error);
+    window.history.replaceState({}, document.title, SPOTIFY.REDIRECT_URI);
+    return false;
+  }
+  if (!code) return false;
+
+  const verifier = sessionStorage.getItem("sp_verifier");
+  if (!verifier) return false;
+
+  const body = new URLSearchParams({
+    client_id: SPOTIFY.CLIENT_ID,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: SPOTIFY.REDIRECT_URI,
+    code_verifier: verifier,
+  });
+
+  try {
+    const res = await fetch(SPOTIFY.TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      spotifyTokens.save(data);
+      sessionStorage.removeItem("sp_verifier");
+    }
+  } catch (e) {
+    console.error("[Spotify] Token exchange failed:", e);
+  }
+  // Clean the ?code=... out of the URL so refreshes don't re-trigger it.
+  window.history.replaceState({}, document.title, SPOTIFY.REDIRECT_URI);
+  return true;
+}
+
+// ── Refresh an expired access token using the stored refresh token ────────────
+async function spotifyRefreshToken() {
+  const refresh = spotifyTokens.refresh;
+  if (!refresh) return false;
+  const body = new URLSearchParams({
+    client_id: SPOTIFY.CLIENT_ID,
+    grant_type: "refresh_token",
+    refresh_token: refresh,
+  });
+  try {
+    const res = await fetch(SPOTIFY.TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const data = await res.json();
+    if (data.access_token) { spotifyTokens.save(data); return true; }
+  } catch (e) {
+    console.error("[Spotify] Token refresh failed:", e);
+  }
+  return false;
+}
+
+// ── Get a valid token, refreshing first if it's expired ───────────────────────
+async function spotifyValidToken() {
+  if (!spotifyTokens.access) return null;
+  if (Date.now() >= spotifyTokens.expiry) {
+    const ok = await spotifyRefreshToken();
+    if (!ok) return null;
+  }
+  return spotifyTokens.access;
+}
+
+// ── Authenticated call to the Spotify Web API ─────────────────────────────────
+async function spotifyApi(path, method = "GET", bodyObj = null) {
+  const token = await spotifyValidToken();
+  if (!token) throw new Error("not_authenticated");
+  const opts = {
+    method,
+    headers: { Authorization: `Bearer ${token}` },
+  };
+  if (bodyObj) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(bodyObj); }
+  const res = await fetch(`https://api.spotify.com/v1${path}`, opts);
+  if (res.status === 204) return null;       // success, no content (common for control calls)
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`spotify_api_${res.status}: ${txt}`);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
 </script>
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef } = React;
@@ -263,6 +446,75 @@ function PlaylistLink({ url, style={} }) {
   );
 }
 
+// ─── Spotify control bar ──────────────────────────────────────────────────────
+// Shows connect button, or playback controls + current track once connected.
+// `playlistUrl` is the current game's playlist (used for the "play" button).
+function SpotifyBar({ sp, playlistUrl, showTrack=true }) {
+  const isSpotifyPlaylist = /open\.spotify\.com\/playlist|spotify:playlist/.test(playlistUrl||"");
+
+  // Not connected: offer to connect (only meaningful if Client ID is set).
+  if (sp.status === "disconnected") {
+    return (
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+        background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
+        <span style={{ color:T.muted, fontSize:13 }}>🟢 Connect Spotify for in-app controls</span>
+        <Btn variant="secondary" small onClick={sp.login}>Connect</Btn>
+      </div>
+    );
+  }
+
+  if (sp.status === "connecting") {
+    return (
+      <div style={{ display:"flex", alignItems:"center", gap:10,
+        background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
+        <Spinner size={16} />
+        <span style={{ color:T.muted, fontSize:13 }}>Connecting to Spotify…</span>
+      </div>
+    );
+  }
+
+  if (sp.status === "no-premium") {
+    return (
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+        background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
+        <span style={{ color:T.muted, fontSize:12, lineHeight:1.4 }}>
+          Connected as <b style={{color:T.text}}>{sp.profile?.display_name||"you"}</b>.<br/>
+          Playback control needs Spotify Premium — use the playlist link instead.
+        </span>
+        <Btn variant="ghost" small onClick={sp.disconnect} style={{ flexShrink:0 }}>✕</Btn>
+      </div>
+    );
+  }
+
+  // Connected + Premium: full controls.
+  const t = sp.track;
+  return (
+    <div style={{ background:T.surface, borderRadius:12, padding:"12px 14px", marginBottom:14,
+      border:`1px solid ${T.green}44` }}>
+      {showTrack && t && (
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+          {t.art && <img src={t.art} alt="" style={{ width:42, height:42, borderRadius:6, flexShrink:0 }} />}
+          <div style={{ minWidth:0, flex:1 }}>
+            <div style={{ color:T.text, fontWeight:700, fontSize:13, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
+            <div style={{ color:T.muted, fontSize:11, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.artist}{t.album?` · ${t.album}`:""}</div>
+          </div>
+        </div>
+      )}
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        {isSpotifyPlaylist && (
+          <Btn variant="success" small onClick={() => sp.playPlaylist(playlistUrl)} style={{ flexShrink:0 }}>▶ Start</Btn>
+        )}
+        <div style={{ display:"flex", gap:6, flex:1, justifyContent:"center" }}>
+          <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:44 }}>⏮</Btn>
+          <Btn variant="secondary" small onClick={sp.togglePlay} style={{ minWidth:44 }}>{t && !t.paused ? "⏸" : "▶"}</Btn>
+          <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:44 }}>⏭</Btn>
+        </div>
+        <Btn variant="ghost" small onClick={sp.disconnect} style={{ flexShrink:0 }}>✕</Btn>
+      </div>
+    </div>
+  );
+}
+
 // ─── Timer hook ───────────────────────────────────────────────────────────────
 function useTimer(init=0) {
   const [secs, setSecs]       = useState(init);
@@ -283,6 +535,135 @@ function useTimer(init=0) {
   const toggleRef = useRef(() => setRunning(r => !r));
 
   return { secs, running, start:startRef.current, pause:pauseRef.current, toggle:toggleRef.current };
+}
+
+// ─── Spotify hook ─────────────────────────────────────────────────────────────
+// Manages connection state, the in-browser player, and playback controls.
+// Status values: "disconnected" | "connecting" | "connected" | "no-premium"
+function useSpotify(ready) {
+  const [status, setStatus]   = useState("disconnected");
+  const [track, setTrack]     = useState(null);   // { name, artist, album, art, paused }
+  const [deviceId, setDeviceId] = useState(null);
+  const [profile, setProfile] = useState(null);   // { display_name, product }
+  const playerRef = useRef(null);
+
+  // Initialise the Web Playback SDK once redirect handling is done + we have a token.
+  useEffect(() => {
+    if (!ready) return;
+    if (!spotifyTokens.access) { setStatus("disconnected"); return; }
+    setStatus("connecting");
+    let cancelled = false;
+
+    async function init() {
+      // First check the account type — free accounts can't use the SDK player.
+      try {
+        const me = await spotifyApi("/me");
+        if (cancelled) return;
+        setProfile(me);
+        if (me.product !== "premium") {
+          setStatus("no-premium");
+          return; // Free user: connected for display purposes, but no player.
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setStatus("disconnected");
+        return;
+      }
+
+      // Premium: build the in-browser player.
+      function buildPlayer() {
+        if (cancelled || !window.Spotify) return;
+        const player = new window.Spotify.Player({
+          name: "Song Game 🎶",
+          getOAuthToken: async (cb) => { const t = await spotifyValidToken(); cb(t); },
+          volume: 0.8,
+        });
+        playerRef.current = player;
+
+        player.addListener("ready", ({ device_id }) => {
+          if (cancelled) return;
+          setDeviceId(device_id);
+          setStatus("connected");
+        });
+        player.addListener("not_ready", () => { if (!cancelled) setDeviceId(null); });
+        player.addListener("player_state_changed", (state) => {
+          if (cancelled || !state) return;
+          const t = state.track_window?.current_track;
+          if (t) {
+            setTrack({
+              name: t.name,
+              artist: t.artists?.map(a => a.name).join(", "),
+              album: t.album?.name,
+              art: t.album?.images?.[0]?.url || null,
+              paused: state.paused,
+            });
+          }
+        });
+        player.addListener("initialization_error", ({ message }) => console.error("[Spotify] init error:", message));
+        player.addListener("authentication_error", ({ message }) => { console.error("[Spotify] auth error:", message); setStatus("disconnected"); });
+        player.addListener("account_error", () => setStatus("no-premium"));
+
+        player.connect();
+      }
+
+      if (window.Spotify) buildPlayer();
+      else window.onSpotifyWebPlaybackSDKReady = buildPlayer;
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+      if (playerRef.current) { playerRef.current.disconnect(); playerRef.current = null; }
+    };
+  }, [ready]);
+
+  // ── Control functions ──────────────────────────────────────────────────────
+  // For Premium with our SDK player, we target our own device so playback
+  // happens right here in the game. If the user is playing on another device
+  // (phone app, desktop app), the API calls still control that instead.
+
+  async function playPlaylist(playlistUrl) {
+    // Extract a Spotify playlist ID from a URL like
+    // https://open.spotify.com/playlist/37i9dQ...  → 37i9dQ...
+    const m = (playlistUrl||"").match(/playlist[/:]([A-Za-z0-9]+)/);
+    if (!m) return false;
+    const context_uri = `spotify:playlist:${m[1]}`;
+    try {
+      const path = deviceId ? `/me/player/play?device_id=${deviceId}` : "/me/player/play";
+      await spotifyApi(path, "PUT", { context_uri });
+      return true;
+    } catch (e) { console.error("[Spotify] play playlist failed:", e); return false; }
+  }
+
+  async function togglePlay() {
+    if (playerRef.current) { playerRef.current.togglePlay(); return; }
+    // Fallback for controlling an external device via the API:
+    try {
+      const state = await spotifyApi("/me/player");
+      if (state?.is_playing) await spotifyApi("/me/player/pause", "PUT");
+      else await spotifyApi("/me/player/play", "PUT");
+    } catch (e) { console.error(e); }
+  }
+  async function next() {
+    if (playerRef.current) { playerRef.current.nextTrack(); return; }
+    try { await spotifyApi("/me/player/next", "POST"); } catch (e) { console.error(e); }
+  }
+  async function previous() {
+    if (playerRef.current) { playerRef.current.previousTrack(); return; }
+    try { await spotifyApi("/me/player/previous", "POST"); } catch (e) { console.error(e); }
+  }
+
+  function disconnect() {
+    if (playerRef.current) { playerRef.current.disconnect(); playerRef.current = null; }
+    spotifyTokens.clear();
+    setStatus("disconnected");
+    setTrack(null);
+    setDeviceId(null);
+    setProfile(null);
+  }
+
+  return { status, track, profile, deviceId, login: spotifyLogin, disconnect,
+           playPlaylist, togglePlay, next, previous };
 }
 
 // ─── Score computation ────────────────────────────────────────────────────────
@@ -764,7 +1145,7 @@ function initEntry(players, albumEnabled) {
   };
 }
 
-function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
+function GameScreen({ game, onUpdateGame, onEndGame, playlists, sp }) {
   const timer = useTimer(game.elapsedSeconds || 0);
   const [albumOn, setAlbumOn]   = useState(game.albumEnabled);
   const [entry, setEntry]       = useState(() => initEntry(game.players, game.albumEnabled));
@@ -913,6 +1294,8 @@ function GameScreen({ game, onUpdateGame, onEndGame, playlists }) {
           <Btn variant="danger" small onClick={() => setShowEnd(true)}>End</Btn>
         </div>
       </div>
+
+      {sp && <SpotifyBar sp={sp} playlistUrl={game.playlistUrl} />}
 
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
         background:T.surface, borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
@@ -1802,6 +2185,14 @@ function App() {
   const [currentGame, setCurrentGame] = useState(null);
   const [lastGame, setLastGame]       = useState(null);
   const [showAccount, setShowAccount] = useState(false);
+  const [spotifyReady, setSpotifyReady] = useState(false);
+
+  // ── Handle the Spotify login redirect (?code=...) once on load ──────────────
+  useEffect(() => {
+    spotifyHandleRedirect().finally(() => setSpotifyReady(true));
+  }, []);
+
+  const sp = useSpotify(spotifyReady);
 
   // ── Auth listener ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1887,7 +2278,7 @@ function App() {
       {screen==="setup" && <SetupScreen playlists={playlists} onStart={startGame} onBack={() => setScreen("home")} user={appUser} />}
       {screen==="game" && currentGame && (
         <GameScreen game={currentGame} onUpdateGame={setCurrentGame} onEndGame={handleEndGame}
-          playlists={playlists} />
+          playlists={playlists} sp={sp} />
       )}
       {summaryId && (() => {
         // Use lastGame first (avoids race with Firebase listener after endGame),
