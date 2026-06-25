@@ -455,12 +455,21 @@ function PlaylistLink({ url, style={} }) {
 }
 
 // ─── Spotify control bar ──────────────────────────────────────────────────────
-// Shows connect button, or playback controls + current track once connected.
-// `playlistUrl` is the current game's playlist (used for the "play" button).
-// `returnScreen` is the screen name to come back to after Spotify login redirect.
 function SpotifyBar({ sp, playlistUrl, returnScreen="home" }) {
-  const [showTrack, setShowTrack] = useState(false);   // hidden by default — avoids spoilers
+  // ALL hooks must be at the top — before any early returns
+  const [showTrack, setShowTrack] = useState(false);
+  const [starting, setStarting]   = useState(false);
+
   const isSpotifyPlaylist = /open\.spotify\.com\/playlist|spotify:playlist/.test(playlistUrl||"");
+  const t         = sp.track;
+  const hasTrack  = !!t;
+  const isPlaying = hasTrack && !t.paused;
+
+  async function handleStart() {
+    setStarting(true);
+    await sp.playPlaylist(playlistUrl);
+    setStarting(false);
+  }
 
   // Not connected: offer to connect.
   if (sp.status === "disconnected") {
@@ -497,12 +506,10 @@ function SpotifyBar({ sp, playlistUrl, returnScreen="home" }) {
   }
 
   // Connected + Premium: full controls.
-  const t = sp.track;
   return (
     <div style={{ background:T.surface, borderRadius:12, padding:"12px 14px", marginBottom:14,
-      border:`1px solid ${T.green}44` }}>
+      border:"1px solid " + T.green + "44" }}>
 
-      {/* Track info — shown only when the user deliberately reveals it */}
       {showTrack && t && (
         <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10,
           background:T.card, borderRadius:8, padding:"8px 10px" }}>
@@ -512,47 +519,39 @@ function SpotifyBar({ sp, playlistUrl, returnScreen="home" }) {
               whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
             <div style={{ color:T.muted, fontSize:11,
               whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-              {t.artist}{t.album?` · ${t.album}`:""}
+              {t.artist}{t.album ? " · " + t.album : ""}
             </div>
           </div>
         </div>
       )}
 
-      {/* Main control row */}
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
 
-        {/* Start playlist button (only for Spotify playlist URLs) */}
-        {isSpotifyPlaylist && (
-          <Btn variant="success" small onClick={() => sp.playPlaylist(playlistUrl)}
-            style={{ flexShrink:0 }}>▶</Btn>
-        )}
-
-        {/* Playback controls */}
-        <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:36 }}>⏮</Btn>
-        <Btn variant="secondary" small onClick={sp.togglePlay} style={{ minWidth:36 }}>
-          {t && !t.paused ? "⏸" : "▶"}
-        </Btn>
-        <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:36 }}>⏭</Btn>
-
-        {/* Re-shuffle: fetches the playlist again and restarts in a new random order */}
-        {isSpotifyPlaylist && (
-          <Btn variant="secondary" small onClick={() => sp.playPlaylist(playlistUrl)}
-            style={{ minWidth:36 }} title="Re-shuffle playlist">
-            🔀
+        {isSpotifyPlaylist && !hasTrack ? (
+          <Btn variant="success" small onClick={handleStart} disabled={starting} style={{ flex:2 }}>
+            {starting ? "Loading..." : "Start Playlist"}
+          </Btn>
+        ) : (
+          <Btn variant={isPlaying ? "secondary" : "success"} small onClick={sp.togglePlay} style={{ flex:2 }}>
+            {isPlaying ? "Pause" : "Play"}
           </Btn>
         )}
 
-        {/* Reveal / hide track info (the anti-spoiler toggle) */}
-        <Btn
-          variant={showTrack ? "secondary" : "ghost"}
-          small
-          onClick={() => setShowTrack(v => !v)}
-          style={{ flex:1, fontSize:11 }}>
-          {showTrack ? "Hide song info" : "👁 Reveal"}
+        <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:36 }}>{"<<"}</Btn>
+        <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:36 }}>{">>"}</Btn>
+
+        {isSpotifyPlaylist && (
+          <Btn variant="secondary" small onClick={handleStart} disabled={starting} style={{ minWidth:36 }}>
+            {starting ? "..." : "Shuffle"}
+          </Btn>
+        )}
+
+        <Btn variant={showTrack ? "secondary" : "ghost"} small
+          onClick={() => setShowTrack(v => !v)} style={{ minWidth:36 }}>
+          {"Reveal"}
         </Btn>
 
-        {/* Disconnect */}
-        <Btn variant="ghost" small onClick={sp.disconnect} style={{ flexShrink:0 }}>✕</Btn>
+        <Btn variant="ghost" small onClick={sp.disconnect} style={{ flexShrink:0 }}>{"X"}</Btn>
       </div>
     </div>
   );
@@ -668,60 +667,72 @@ function useSpotify(ready) {
   async function playPlaylist(playlistUrl) {
     // Extract a Spotify playlist ID from a URL like
     // https://open.spotify.com/playlist/37i9dQ...  → 37i9dQ...
+  async function playPlaylist(playlistUrl) {
     const m = (playlistUrl||"").match(/playlist[/:]([A-Za-z0-9]+)/);
     if (!m) return false;
     const playlistId = m[1];
 
     try {
-      // ── Fetch ALL track URIs from the playlist ──────────────────────────────
-      // Spotify pages results at 100 tracks max, so we loop until we have them all.
+      // ── Step 1: fetch ALL track URIs ──────────────────────────────────────
+      // No `fields` filter — it's fragile. Just fetch items and pull out uris.
       let uris = [];
-      let nextUrl = `/playlists/${playlistId}/tracks?fields=next,items(track(uri,is_local))&limit=100`;
-      while (nextUrl) {
-        const page = await spotifyApi(nextUrl);
-        if (!page?.items) break;
+      let offset = 0;
+      const LIMIT = 100;
+      while (true) {
+        const page = await spotifyApi(
+          `/playlists/${playlistId}/tracks?limit=${LIMIT}&offset=${offset}`
+        );
+        if (!page?.items?.length) break;
         page.items.forEach(item => {
-          // Skip local files — they can't be played via API
-          if (item?.track?.uri && !item.track.is_local) {
+          // Skip nulls (deleted tracks) and local files (can't be played via API)
+          if (item?.track?.uri && !item.track.is_local &&
+              item.track.uri.startsWith("spotify:track:")) {
             uris.push(item.track.uri);
           }
         });
-        // `next` is a full URL like https://api.spotify.com/v1/...
-        // Strip the base so spotifyApi can prepend it again.
-        nextUrl = page.next
-          ? page.next.replace("https://api.spotify.com/v1", "")
-          : null;
+        if (page.items.length < LIMIT) break; // last page
+        offset += LIMIT;
       }
 
       if (uris.length === 0) {
         console.warn("[Spotify] Playlist has no playable tracks");
         return false;
       }
+      console.log(`[Spotify] Fetched ${uris.length} tracks`);
 
-      // ── Fisher-Yates shuffle — guaranteed different order every call ─────────
+      // ── Step 2: Fisher-Yates shuffle ──────────────────────────────────────
       for (let i = uris.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [uris[i], uris[j]] = [uris[j], uris[i]];
       }
 
-      // ── Send the pre-shuffled URI list to Spotify ───────────────────────────
-      // Using `uris` instead of `context_uri` means Spotify plays exactly what
-      // we give it in the order we give it — it has no original-order to revert to.
-      // NOTE: Spotify accepts max 750 URIs per call. Most playlists are under that;
-      // for very long ones we cap at 750 (still fully shuffled, just truncated).
-      const MAX_URIS = 750;
-      if (uris.length > MAX_URIS) uris = uris.slice(0, MAX_URIS);
+      // Spotify accepts max 750 URIs per play call
+      if (uris.length > 750) uris = uris.slice(0, 750);
 
-      const playPath = deviceId ? `/me/player/play?device_id=${deviceId}` : "/me/player/play";
+      // ── Step 3: activate device then play ─────────────────────────────────
+      // When using `uris` (not context_uri), Spotify requires the device to be
+      // active first. We do this by sending an empty play call to wake it, then
+      // follow immediately with the actual URI list.
+      if (deviceId) {
+        // Wake the device — this transfers playback to our in-browser player
+        await spotifyApi(`/me/player/play?device_id=${deviceId}`, "PUT", {})
+          .catch(() => {}); // might 403 if already active — that's fine
+        // Small pause to let the device register as active
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      // ── Step 4: play the shuffled list ────────────────────────────────────
+      const playPath = deviceId
+        ? `/me/player/play?device_id=${deviceId}`
+        : "/me/player/play";
       await spotifyApi(playPath, "PUT", { uris });
 
-      // Turn Spotify's own shuffle OFF — we've already shuffled, and leaving it
-      // on would cause Spotify to re-shuffle our pre-shuffled list after a few tracks.
-      const shufflePath = deviceId
-        ? `/me/player/shuffle?state=false&device_id=${deviceId}`
-        : `/me/player/shuffle?state=false`;
+      // Turn Spotify's own shuffle OFF — we've already shuffled ourselves.
+      // If Spotify's shuffle is also on, it will re-shuffle our list after ~5 tracks.
+      const shufflePath = "/me/player/shuffle?state=false" + (deviceId ? "&device_id=" + deviceId : "");
       await spotifyApi(shufflePath, "PUT").catch(() => {});
 
+      console.log("[Spotify] Playlist started in shuffled order");
       return true;
     } catch (e) {
       console.error("[Spotify] playPlaylist failed:", e);
