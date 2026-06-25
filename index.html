@@ -8,8 +8,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
-<!-- Spotify Web Playback SDK -->
-<script src="https://sdk.scdn.co/spotify-player.js"></script>
 <!-- Firebase -->
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
@@ -134,6 +132,14 @@ const SPOTIFY = {
   TOKEN_URL: "https://accounts.spotify.com/api/token",
 };
 console.log("[Spotify] Redirect URI:", SPOTIFY.REDIRECT_URI);
+
+// Stub for the Spotify SDK callback — the useSpotify hook replaces this with
+// the real player builder once React has mounted. If the SDK loads before the
+// hook runs, it calls this stub which queues the init for when the hook is ready.
+window._spotifySDKReady = false;
+window.onSpotifyWebPlaybackSDKReady = function() {
+  window._spotifySDKReady = true;
+};
 
 function spotifyRandomString(length) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -444,8 +450,14 @@ function useSpotify(ready) {
         player.addListener("account_error", function() { if (!cancelled) setStatus("no-premium"); });
         player.connect();
       }
-      if (window.Spotify) buildPlayer();
-      else window.onSpotifyWebPlaybackSDKReady = buildPlayer;
+      if (window.Spotify && window._spotifySDKReady) {
+        // SDK already loaded and fired its callback — build immediately
+        buildPlayer();
+      } else {
+        // SDK not ready yet — our stub will have set _spotifySDKReady=true when it fires.
+        // Replace the stub with the real builder so the SDK triggers it directly.
+        window.onSpotifyWebPlaybackSDKReady = buildPlayer;
+      }
     }
 
     init();
@@ -2342,5 +2354,7 @@ function App() {
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
+<!-- Spotify Web Playback SDK loads LAST so onSpotifyWebPlaybackSDKReady is already defined -->
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 </body>
 </html>
