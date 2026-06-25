@@ -125,9 +125,13 @@ const db = {
 const SPOTIFY = {
   CLIENT_ID: "2d460cd102fc4ce9bf4ea4e97b1831eb",
   get REDIRECT_URI() { return window.location.origin + window.location.pathname; },
+  // v2: added playlist-read-private and playlist-read-collaborative
+  SCOPES_VERSION: "v2",
   SCOPES: ["streaming","user-read-email","user-read-private",
            "user-read-playback-state","user-modify-playback-state",
-           "user-read-currently-playing"].join(" "),
+           "user-read-currently-playing",
+           "playlist-read-private","playlist-read-collaborative",
+           "playlist-read-public"].join(" "),
   AUTH_URL:  "https://accounts.spotify.com/authorize",
   TOKEN_URL: "https://accounts.spotify.com/api/token",
 };
@@ -140,6 +144,9 @@ window._spotifySDKReady = false;
 window.onSpotifyWebPlaybackSDKReady = function() {
   window._spotifySDKReady = true;
 };
+
+// Clear any token that was issued with an old/different scope set
+spotifyTokens.checkVersion();
 
 function spotifyRandomString(length) {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -162,10 +169,21 @@ const spotifyTokens = {
   save(data) {
     const stored = { access_token: data.access_token,
       refresh_token: data.refresh_token || this.refresh,
-      expires_at: Date.now() + (data.expires_in * 1000) - 60000 };
+      expires_at: Date.now() + (data.expires_in * 1000) - 60000,
+      scopes_version: SPOTIFY.SCOPES_VERSION };
     sessionStorage.setItem("sp_tokens", JSON.stringify(stored));
   },
   clear() { sessionStorage.removeItem("sp_tokens"); },
+  // Call on startup — clears token if it was issued with an older scope set
+  checkVersion() {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem("sp_tokens"));
+      if (stored && stored.scopes_version !== SPOTIFY.SCOPES_VERSION) {
+        console.log("[Spotify] Scope version changed, clearing old token");
+        this.clear();
+      }
+    } catch { this.clear(); }
+  },
 };
 
 async function spotifyLogin(returnScreen) {
