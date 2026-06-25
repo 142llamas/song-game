@@ -499,35 +499,29 @@ function useSpotify(ready) {
     var m = (playlistUrl||"").match(/playlist[/:]([A-Za-z0-9]+)/);
     if (!m) return false;
     var playlistId = m[1];
+    var context_uri = "spotify:playlist:" + playlistId;
     try {
-      var uris = [];
-      var offset = 0;
-      var LIMIT = 100;
-      while (true) {
-        var page = await spotifyApi("/playlists/" + playlistId + "/tracks?limit=" + LIMIT + "&offset=" + offset);
-        if (!page || !page.items || !page.items.length) break;
-        page.items.forEach(function(item) {
-          if (item && item.track && item.track.uri && !item.track.is_local &&
-              item.track.uri.indexOf("spotify:track:") === 0) uris.push(item.track.uri);
-        });
-        if (page.items.length < LIMIT) break;
-        offset += LIMIT;
-      }
-      if (!uris.length) { console.warn("[Spotify] No playable tracks"); return false; }
-      console.log("[Spotify] Fetched " + uris.length + " tracks");
-      for (var i = uris.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var tmp = uris[i]; uris[i] = uris[j]; uris[j] = tmp;
-      }
-      if (uris.length > 750) uris = uris.slice(0, 750);
+      // Wake/transfer to our in-browser device first
       if (deviceId) {
-        await spotifyApi("/me/player/play?device_id=" + deviceId, "PUT", {}).catch(function(){});
-        await new Promise(function(r) { setTimeout(r, 300); });
+        await spotifyApi("/me/player/play?device_id=" + deviceId, "PUT", { context_uri: context_uri }).catch(function(){});
+        await new Promise(function(r) { setTimeout(r, 400); });
       }
+
+      // Enable Spotify's shuffle BEFORE play so the starting track is randomized
+      await spotifyApi("/me/player/shuffle?state=true" + (deviceId ? "&device_id=" + deviceId : ""), "PUT").catch(function(){});
+
+      // Start playback of the playlist context. With shuffle on, Spotify picks
+      // a random track order. We don't specify an offset so shuffle controls order.
       var playPath = deviceId ? "/me/player/play?device_id=" + deviceId : "/me/player/play";
-      await spotifyApi(playPath, "PUT", { uris: uris });
-      await spotifyApi("/me/player/shuffle?state=false" + (deviceId ? "&device_id=" + deviceId : ""), "PUT").catch(function(){});
-      console.log("[Spotify] Playing shuffled playlist");
+      await spotifyApi(playPath, "PUT", { context_uri: context_uri });
+
+      // Re-assert shuffle after play (Spotify sometimes resets it on context change)
+      await new Promise(function(r) { setTimeout(r, 300); });
+      await spotifyApi("/me/player/shuffle?state=true" + (deviceId ? "&device_id=" + deviceId : ""), "PUT").catch(function(){});
+      // Skip to next once so we don't always start on the same first shuffled track
+      await spotifyApi("/me/player/next" + (deviceId ? "?device_id=" + deviceId : ""), "POST").catch(function(){});
+
+      console.log("[Spotify] Playing playlist with shuffle");
       return true;
     } catch(e) { console.error("[Spotify] playPlaylist failed:", e); return false; }
   }
