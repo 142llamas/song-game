@@ -186,16 +186,22 @@ const spotifyTokens = {
 spotifyTokens.checkVersion();
 
 async function spotifyLogin(returnScreen) {
-  const verifier  = spotifyRandomString(64);
-  const challenge = spotifyBase64url(await spotifySha256(verifier));
-  sessionStorage.setItem("sp_verifier", verifier);
-  sessionStorage.setItem("sp_return_screen", returnScreen || "home");
-  const params = new URLSearchParams({
-    client_id: SPOTIFY.CLIENT_ID, response_type: "code",
-    redirect_uri: SPOTIFY.REDIRECT_URI, scope: SPOTIFY.SCOPES,
-    code_challenge_method: "S256", code_challenge: challenge,
-  });
-  window.location.href = SPOTIFY.AUTH_URL + "?" + params.toString();
+  try {
+    const verifier  = spotifyRandomString(64);
+    const challenge = spotifyBase64url(await spotifySha256(verifier));
+    sessionStorage.setItem("sp_verifier", verifier);
+    sessionStorage.setItem("sp_return_screen", returnScreen || "home");
+    const params = new URLSearchParams({
+      client_id: SPOTIFY.CLIENT_ID, response_type: "code",
+      redirect_uri: SPOTIFY.REDIRECT_URI, scope: SPOTIFY.SCOPES,
+      code_challenge_method: "S256", code_challenge: challenge,
+    });
+    console.log("[Spotify] Redirecting to login, redirect_uri:", SPOTIFY.REDIRECT_URI);
+    window.location.href = SPOTIFY.AUTH_URL + "?" + params.toString();
+  } catch(e) {
+    console.error("[Spotify] Login failed:", e);
+    alert("Spotify login error: " + e.message + "\n\nCheck the browser console for details.");
+  }
 }
 
 async function spotifyHandleRedirect() {
@@ -2368,6 +2374,20 @@ function App() {
     </div>
   );
 }
+
+// Global error catcher — shows any uncaught error on screen instead of blank page
+window.addEventListener("error", function(e) {
+  var div = document.createElement("div");
+  div.style.cssText = "position:fixed;top:0;left:0;right:0;background:#7F1D1D;color:#FCA5A5;padding:16px;font-family:monospace;font-size:13px;z-index:9999;white-space:pre-wrap;word-break:break-all;";
+  div.textContent = "JS ERROR: " + e.message + "\n" + (e.filename||"") + " line " + e.lineno;
+  document.body.appendChild(div);
+});
+window.addEventListener("unhandledrejection", function(e) {
+  var div = document.createElement("div");
+  div.style.cssText = "position:fixed;top:40px;left:0;right:0;background:#7c3700;color:#fed7aa;padding:16px;font-family:monospace;font-size:13px;z-index:9999;white-space:pre-wrap;word-break:break-all;";
+  div.textContent = "ASYNC ERROR: " + (e.reason && e.reason.message || e.reason || "unknown");
+  document.body.appendChild(div);
+});
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
