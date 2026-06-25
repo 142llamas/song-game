@@ -619,22 +619,23 @@ function SpotifyBar({ sp, playlistUrl, returnScreen }) {
         </div>
       )}
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        {isSpotifyPl && !hasTrack ? (
+        {isSpotifyPl ? (
+          // Start always (re)starts THIS game's playlist — needed when switching games
           <Btn variant="success" small onClick={handleStart} disabled={starting} style={{ flex:2 }}>
-            {starting ? "Loading..." : "Start Playlist"}
+            {starting ? "Loading..." : (hasTrack ? "Start This Playlist" : "Start Playlist")}
           </Btn>
         ) : (
           <Btn variant={playing ? "secondary" : "success"} small onClick={sp.togglePlay} style={{ flex:2 }}>
             {playing ? "Pause" : "Play"}
           </Btn>
         )}
-        <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:38 }}>Prev</Btn>
-        <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:38 }}>Next</Btn>
-        {isSpotifyPl && (
-          <Btn variant="secondary" small onClick={handleStart} disabled={starting} style={{ minWidth:50 }}>
-            {starting ? "..." : "Shuffle"}
+        {isSpotifyPl && hasTrack && (
+          <Btn variant="secondary" small onClick={sp.togglePlay} style={{ minWidth:50 }}>
+            {playing ? "Pause" : "Play"}
           </Btn>
         )}
+        <Btn variant="secondary" small onClick={sp.previous} style={{ minWidth:38 }}>Prev</Btn>
+        <Btn variant="secondary" small onClick={sp.next} style={{ minWidth:38 }}>Next</Btn>
         <Btn variant={showTrack ? "secondary" : "ghost"} small
           onClick={() => setShowTrack(function(v){return !v;})} style={{ minWidth:38 }}>
           {showTrack ? "Hide" : "Reveal"}
